@@ -20,6 +20,7 @@ public:
 	void MovementLock(CUserCmd* cmd);
 	void MvmInstaRespawn();
 	void AntiAFK(CUserCmd* pCmd);
+	void PDAExploit(CUserCmd* pCmd);
 	void AutoCallMedic();
 	void VoiceCommandSpam();
 	void AutoFaN(CUserCmd* pCmd);

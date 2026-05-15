@@ -4539,6 +4539,7 @@ void CMenu::MainWindow()
 			CheckBox("Anti Server Angle Change", CFG::Misc_Prevent_Server_Angle_Change);
 			CheckBox("Freeze Queue", CFG::Misc_Freeze_Queue);
 			CheckBox("Anti-AFK", CFG::Misc_Anti_AFK);
+			CheckBox("PDA Exploit - Sniper", CFG::Misc_PDA_Exploit_Sniper);
 			if (Button("Unlock CVars"))
 			{
 				auto iter = ICvar::Iterator(I::CVar);

@@ -1147,6 +1147,62 @@ void CMisc::AntiAFK(CUserCmd* pCmd)
 	}
 }
 
+void CMisc::PDAExploit(CUserCmd* pCmd)
+{
+	if (!CFG::Misc_PDA_Exploit_Sniper)
+		return;
+
+	const auto pLocal = H::Entities->GetLocal();
+	if (!pLocal || pLocal->deadflag() || pLocal->m_iClass() != TF_CLASS_SNIPER)
+		return;
+
+	const auto pWeapon = H::Entities->GetWeapon();
+	if (!pWeapon)
+		return;
+
+	const int iWeaponID = pWeapon->GetWeaponID();
+	if (iWeaponID != TF_WEAPON_SNIPERRIFLE && iWeaponID != TF_WEAPON_SNIPERRIFLE_DECAP && iWeaponID != TF_WEAPON_SNIPERRIFLE_CLASSIC)
+		return;
+
+	// State machine: 0 = idle, 1 = waiting after shot (10 ticks), 2 = PDA open sent (10 ticks), 3 = PDA close sent (cooldown)
+	static int iState = 0;
+	static int iStateTick = 0;
+
+	const int iCurTick = I::GlobalVars->tickcount;
+
+	// Detect shot: zoomed + pressing attack (matches bind: +attack while zoomed)
+	const bool bFiring = pLocal->IsZoomed() && (pCmd->buttons & IN_ATTACK);
+
+	// Start exploit when we fire while zoomed
+	if (iState == 0 && bFiring)
+	{
+		iState = 1;
+		iStateTick = iCurTick;
+	}
+
+	// Send PDA open 10 ticks after shot (matches bind: +attack; wait 10; cyoa_pda_open 1)
+	if (iState == 1 && (iCurTick - iStateTick) >= 10)
+	{
+		I::EngineClient->ServerCmd("cyoa_pda_open 1");
+		iState = 2;
+		iStateTick = iCurTick;
+	}
+
+	// Close PDA after 10 ticks (matches bind: wait 10; cyoa_pda_open 0)
+	if (iState == 2 && (iCurTick - iStateTick) >= 10)
+	{
+		I::EngineClient->ServerCmd("cyoa_pda_open 0");
+		iState = 3;
+		iStateTick = iCurTick;
+	}
+
+	// Cooldown before allowing next exploit
+	if (iState == 3 && (iCurTick - iStateTick) >= 10)
+	{
+		iState = 0;
+	}
+}
+
 void CMisc::AutoUber(CUserCmd* cmd)
 {
     if (!CFG::AutoUber_Active)

@@ -457,6 +457,9 @@ MAKE_HOOK(CHLClient_Createmove, Memory::GetVFunc(I::ClientModeShared, 21), bool,
 		// This is how Amalgam does it - G::Attacking = SDK::IsAttacking(pLocal, pWeapon, pCmd, true)
 		G::Attacking = SDK::IsAttacking(pLocal, pWeapon, pCmd, true);
 
+		// PDA exploit AFTER aimbot - needs to see IN_ATTACK set by aimbot
+		F::Misc->PDAExploit(pCmd);
+
 		// CritHack after aimbot - pass pCmd directly so it sees the aimbot's changes
 		F::CritHack->Run(pLocal, pWeapon, pCmd);
 

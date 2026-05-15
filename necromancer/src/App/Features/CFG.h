@@ -814,6 +814,7 @@ namespace CFG
 	CFGVAR(Misc_Auto_FastClassSwitch, false);
 	CFGVAR(Misc_Auto_Rejoin_On_Kick, false);
 	CFGVAR(Misc_Anti_AFK, true);
+	CFGVAR(Misc_PDA_Exploit_Sniper, false);
 
 	// Region Selector (Force Regions)
 	CFGVAR(Exploits_Region_Selector_Active, false);
