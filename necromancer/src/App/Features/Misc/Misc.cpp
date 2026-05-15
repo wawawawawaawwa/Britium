@@ -1164,7 +1164,7 @@ void CMisc::PDAExploit(CUserCmd* pCmd)
 	if (iWeaponID != TF_WEAPON_SNIPERRIFLE && iWeaponID != TF_WEAPON_SNIPERRIFLE_DECAP && iWeaponID != TF_WEAPON_SNIPERRIFLE_CLASSIC)
 		return;
 
-	// State machine: 0 = idle, 1 = waiting after shot (10 ticks), 2 = PDA open sent (10 ticks), 3 = PDA close sent (cooldown)
+	// State machine: 0 = idle, 1 = waiting after shot (5 ticks), 2 = PDA open sent (5 ticks), 3 = PDA close sent (cooldown)
 	static int iState = 0;
 	static int iStateTick = 0;
 
@@ -1180,16 +1180,16 @@ void CMisc::PDAExploit(CUserCmd* pCmd)
 		iStateTick = iCurTick;
 	}
 
-	// Send PDA open 10 ticks after shot (matches bind: +attack; wait 10; cyoa_pda_open 1)
-	if (iState == 1 && (iCurTick - iStateTick) >= 10)
+	// Send PDA open 5 ticks after shot
+	if (iState == 1 && (iCurTick - iStateTick) >= 5)
 	{
 		I::EngineClient->ServerCmd("cyoa_pda_open 1");
 		iState = 2;
 		iStateTick = iCurTick;
 	}
 
-	// Close PDA after 10 ticks (matches bind: wait 10; cyoa_pda_open 0)
-	if (iState == 2 && (iCurTick - iStateTick) >= 10)
+	// Close PDA after 5 ticks
+	if (iState == 2 && (iCurTick - iStateTick) >= 5)
 	{
 		I::EngineClient->ServerCmd("cyoa_pda_open 0");
 		iState = 3;
@@ -1197,7 +1197,7 @@ void CMisc::PDAExploit(CUserCmd* pCmd)
 	}
 
 	// Cooldown before allowing next exploit
-	if (iState == 3 && (iCurTick - iStateTick) >= 10)
+	if (iState == 3 && (iCurTick - iStateTick) >= 5)
 	{
 		iState = 0;
 	}
