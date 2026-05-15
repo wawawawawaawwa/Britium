@@ -108,26 +108,34 @@ namespace
 		if (vRecords.size() > 1)
 		{
 			const auto& tPrevious = vRecords[1];
-			const Vec3 vTraceStart = tPrevious.m_vOrigin;
-			const Vec3 vTraceEnd = vTraceStart + tPrevious.m_vVelocity * TICK_INTERVAL;
-
-			CTraceFilterWorldAndPropsOnlyAmalgam filter = {};
-			filter.pSkip = pPlayer;
-
-			trace_t trace = {};
-			const Vec3 vCompression(PlayerOriginCompression, PlayerOriginCompression, 0.f);
-			SDK::TraceHull(vTraceStart, vTraceEnd, pPlayer->m_vecMins() + vCompression, pPlayer->m_vecMaxs() - vCompression, SolidMask(pPlayer), &filter, &trace);
-
-			if (trace.DidHit() && trace.plane.normal.z < 0.7f)
+			
+			// Optimization: Skip expensive TraceHull when velocity is very low
+			// Low velocity = minimal movement = wall collision unlikely
+			// Threshold: 50 HU/s (walking speed is ~230 HU/s)
+			const float flSpeed = tPrevious.m_vVelocity.Length2D();
+			if (flSpeed > 50.0f)
 			{
-				// Match Amalgam: clear ALL stale history on wall hit.
-				// The old fallback-from-history approach would chain zero
-				// directions on complex geometry (corridors/corners),
-				// causing the sim to think the enemy stopped moving.
-				// Keep only the current (newest) record and let it
-				// re-derive direction from actual velocity next frame.
-				vRecords.erase(vRecords.begin() + 1, vRecords.end());
-				return;
+				const Vec3 vTraceStart = tPrevious.m_vOrigin;
+				const Vec3 vTraceEnd = vTraceStart + tPrevious.m_vVelocity * TICK_INTERVAL;
+
+				CTraceFilterWorldAndPropsOnlyAmalgam filter = {};
+				filter.pSkip = pPlayer;
+
+				trace_t trace = {};
+				const Vec3 vCompression(PlayerOriginCompression, PlayerOriginCompression, 0.f);
+				SDK::TraceHull(vTraceStart, vTraceEnd, pPlayer->m_vecMins() + vCompression, pPlayer->m_vecMaxs() - vCompression, SolidMask(pPlayer), &filter, &trace);
+
+				if (trace.DidHit() && trace.plane.normal.z < 0.7f)
+				{
+					// Match Amalgam: clear ALL stale history on wall hit.
+					// The old fallback-from-history approach would chain zero
+					// directions on complex geometry (corridors/corners),
+					// causing the sim to think the enemy stopped moving.
+					// Keep only the current (newest) record and let it
+					// re-derive direction from actual velocity next frame.
+					vRecords.erase(vRecords.begin() + 1, vRecords.end());
+					return;
+				}
 			}
 		}
 
@@ -204,7 +212,16 @@ void CMovementSimulation::Store()
 	for (int n = 1; n <= nMaxClients; n++)
 	{
 		auto pEntity = I::ClientEntityList->GetClientEntity(n);
-		C_TFPlayer* pPlayer = pEntity ? pEntity->As<C_TFPlayer>() : nullptr;
+		
+		// Early exit: skip null/dormant entities before any processing
+		if (!pEntity || pEntity->IsDormant())
+		{
+			m_mRecords[n].clear();
+			m_mSimTimes[n].clear();
+			continue;
+		}
+		
+		C_TFPlayer* pPlayer = pEntity->As<C_TFPlayer>();
 		auto& vRecords = m_mRecords[n];
 
 		if (!IsUsablePlayer(pPlayer) || pPlayer == pLocal)
@@ -247,13 +264,84 @@ void CMovementSimulation::Store()
 				vSimTimes.pop_back();
 		}
 
-		const Vec3 vVelocity = pPlayer->m_vecVelocity();
+		Vec3 vVelocity = pPlayer->m_vecVelocity();
+
+		// RijiN duck velocity spike fix: when ducking/unducking, the OBB changes and
+		// origin shifts by ~20 units Z in one tick, causing a false velocity spike.
+		// If Z origin moved > 15 units while on ground, it's a duck transition, not real Z velocity.
+		if (!vRecords.empty())
+		{
+			const float flOriginDeltaZ = (vOrigin - vRecords.front().m_vOrigin).z;
+			if (IsOnGround(pPlayer) && std::fabs(flOriginDeltaZ) > 15.f)
+				vVelocity.z = 0.f;
+		}
+
+		// RijiN: clamp ground velocity to max speed. Players on ground can't exceed
+		// their max speed (sv_maxvelocity aside), and stale/interpolated velocity
+		// can exceed this causing prediction overshoot.
+		if (IsOnGround(pPlayer))
+		{
+			const float flMaxSpeed = SDK::MaxSpeed(pPlayer);
+			const float flSpeed = vVelocity.Length2D();
+			if (flSpeed > flMaxSpeed && flSpeed > 0.f)
+			{
+				vVelocity.x *= flMaxSpeed / flSpeed;
+				vVelocity.y *= flMaxSpeed / flSpeed;
+			}
+		}
+
 		MoveRecord tRecord = {};
 		tRecord.m_vDirection = DirectionFromVelocity(vVelocity);
+		
+		// If velocity is near zero, preserve the previous direction from history
+		// This prevents the simulation from thinking the player stopped when they're
+		// just changing direction or have a momentary velocity drop
+		if (tRecord.m_vDirection.IsZero() && !vRecords.empty() && !vRecords.front().m_vDirection.IsZero())
+		{
+			tRecord.m_vDirection = vRecords.front().m_vDirection;
+		}
+		
 		tRecord.m_flSimTime = flSimTime;
 		tRecord.m_iMode = GetMoveMode(pPlayer);
 		tRecord.m_vVelocity = vVelocity;
 		tRecord.m_vOrigin = vOrigin;
+
+		// RijiN evasion detection: check if the player is rapidly changing direction on ground.
+		// Erratic movement means our prediction will be unreliable — apply friction or zero velocity.
+		if (IsOnGround(pPlayer) && vRecords.size() >= 4)
+		{
+			int iEvasionCount = 0;
+			int iHighDeltaCount = 0;
+			constexpr int EvasionRequiredSamples = 4;
+
+			for (int i = 0; i < EvasionRequiredSamples && i < static_cast<int>(vRecords.size()) - 1; i++)
+			{
+				const auto& tCur = vRecords[i];
+				const auto& tPrev = vRecords[i + 1];
+
+				if (tCur.m_vDirection.IsZero() || tPrev.m_vDirection.IsZero())
+					continue;
+
+				const float flCurYaw = YawFromVector(tCur.m_vDirection);
+				const float flPrevYaw = YawFromVector(tPrev.m_vDirection);
+				const float flYawDelta = std::fabs(Math::NormalizeAngle(flCurYaw - flPrevYaw));
+
+				// Direction reversal (sign change) or very high yaw delta = evasive
+				const int iCurSign = sign(Math::NormalizeAngle(flCurYaw - flPrevYaw));
+				const int iPrevSign = i > 0 ? sign(Math::NormalizeAngle(YawFromVector(vRecords[i - 1].m_vDirection) - flCurYaw)) : 0;
+				if ((iPrevSign && iCurSign && iCurSign != iPrevSign) || flYawDelta >= 15.f)
+					iEvasionCount++;
+
+				if (flYawDelta >= 25.f)
+					iHighDeltaCount++;
+			}
+
+			if (iEvasionCount >= EvasionRequiredSamples)
+				tRecord.m_bEvasiveFriction = true;
+
+			if (iHighDeltaCount >= EvasionRequiredSamples)
+				tRecord.m_bEvasiveZeroVel = true;
+		}
 
 		vRecords.push_front(tRecord);
 		while (vRecords.size() > MaxMoveRecords)
@@ -321,30 +409,76 @@ bool CMovementSimulation::Initialize(C_TFPlayer* pPlayer, MoveStorage& tMoveStor
 
 	if (C_TFPlayer* pLocal = H::Entities ? H::Entities->GetLocal() : nullptr; pPlayer != pLocal)
 	{
+		// Explicitly backup values we modify that CPredictionCopy might not reliably restore
+		// (model scale and origin are rendered netvars — if restore fails, player shrinks/disappears)
+		tMoveStorage.m_flOldModelScale = pPlayer->m_flModelScale();
+		tMoveStorage.m_vOldOrigin = pPlayer->m_vecOrigin();
+		tMoveStorage.m_bHasBackup = true;
+
 		if (Vec3* pAverage = g_AmalgamEntitiesExt.GetAvgVelocity(pPlayer->entindex()); pAverage && !pAverage->IsZero())
 			pPlayer->m_vecVelocity() = *pAverage;
 
+		// SEOwned duck fix: FL_DUCKING breaks origin Z — must remove it.
+		// m_bInDuckJump = true prevents the engine from re-ducking during sim
+		// (SEOwned sets true, we previously set false which could cause re-duck artifacts)
 		if (IsDucking(pPlayer))
 		{
 			pPlayer->m_fFlags() &= ~FL_DUCKING;
 			pPlayer->m_bDucked() = true;
 			pPlayer->m_bDucking() = false;
-			pPlayer->m_bInDuckJump() = false;
+			pPlayer->m_bInDuckJump() = true;
 			pPlayer->m_flDucktime() = 0.f;
 			pPlayer->m_flDuckJumpTime() = 0.f;
 		}
 
-		pPlayer->m_vecBaseVelocity() = {};
+		// NOTE: SEOwned shrinks model scale by 0.03125 but we skip that —
+		// our SetBounds already compresses the collision hull, and modifying
+		// m_flModelScale on the entity causes visible shrinking and crashes
+		// because it's a rendered netvar that may not be restored in time.
+
+		// SEOwned: lift origin off ground to prevent ground sticking.
+		// Without this, the sim can get the player embedded in floor geometry.
 		if (IsOnGround(pPlayer))
-			pPlayer->m_vecVelocity().z = std::min(pPlayer->m_vecVelocity().z, 0.f);
+			pPlayer->m_vecOrigin().z += 0.03125f * 3.0f;
+
+		pPlayer->m_vecBaseVelocity() = {};
+
+		// SEOwned: zero out Z velocity when on ground (not just clamp to 0).
+		// Residual downward Z can cause the sim to think the player is falling.
+		if (IsOnGround(pPlayer))
+			pPlayer->m_vecVelocity().z = 0.0f;
 		else
 			pPlayer->m_hGroundEntity() = nullptr;
+
+		// SEOwned: nudge near-zero XY velocity to prevent prediction stall.
+		// GameMovement skips processing when velocity is effectively zero.
+		if (fabsf(pPlayer->m_vecVelocity().x) < 0.01f)
+			pPlayer->m_vecVelocity().x = 0.015f;
+
+		if (fabsf(pPlayer->m_vecVelocity().y) < 0.01f)
+			pPlayer->m_vecVelocity().y = 0.015f;
 	}
 
 	float flCadenceOut = 0.f;
 	tMoveStorage.m_bBunnyHop = IsBunnyHopping(pPlayer, &flCadenceOut);
 	tMoveStorage.m_flBhopCadence = flCadenceOut;
 	tMoveStorage.m_iBhopSimTicksInAir = 0;
+
+	// RijiN: propagate evasion detection from newest record
+	{
+		const auto itRecords = m_mRecords.find(pPlayer->entindex());
+		if (itRecords != m_mRecords.end() && !itRecords->second.empty())
+		{
+			tMoveStorage.m_bEvasiveFriction = itRecords->second.front().m_bEvasiveFriction;
+			// Zero velocity for extremely erratic movement — prediction is unreliable
+			if (itRecords->second.front().m_bEvasiveZeroVel && pPlayer != (H::Entities ? H::Entities->GetLocal() : nullptr))
+			{
+				pPlayer->m_vecVelocity().x = 0.f;
+				pPlayer->m_vecVelocity().y = 0.f;
+			}
+		}
+	}
+
 	SetupMoveData(tMoveStorage, bStrafe);
 	if (bStrafe)
 		StrafePrediction(tMoveStorage, bHitchance);
@@ -387,17 +521,46 @@ void CMovementSimulation::SetupMoveData(MoveStorage& tMoveStorage, bool bStrafe)
 		tMoveData.m_flUpMove = pCmd->upmove;
 		tMoveData.m_nButtons = pCmd->buttons;
 	}
-	else if (!vRecords.empty())
+	else if (!pPlayer->m_vecVelocity().To2D().IsZero())
 	{
-		Vec3 vDirection = vRecords.front().m_vDirection;
-		if (vDirection.IsZero())
-			vDirection = DirectionFromVelocity(pPlayer->m_vecVelocity());
-
+		// Amalgam-style: only use records when current velocity is non-zero
+		// This matches Amalgam's check: if (!tMoveStorage.m_MoveData.m_vecVelocity.To2D().IsZero())
+		int iIndex = pPlayer->entindex();
 		if (pPlayer->InCond(TF_COND_SHIELD_CHARGE))
 			tMoveData.m_vecViewAngles = pPlayer->GetEyeAngles();
-		else if (!pPlayer->m_vecVelocity().To2D().IsZero())
-			tMoveData.m_vecViewAngles = Math::VectorAngles(pPlayer->m_vecVelocity().To2D());
+		else
+			tMoveData.m_vecViewAngles = { 0.f, Math::VectorAngles(pPlayer->m_vecVelocity().To2D()).y, 0.f };
 
+		// Use direction from records if available and non-zero (matches Amalgam)
+		const auto& vRecords = m_mRecords[iIndex];
+		if (!vRecords.empty())
+		{
+			Vec3 vDirection = vRecords.front().m_vDirection;
+			if (!vDirection.IsZero())
+			{
+				g_MoveSimCmd = {};
+				g_MoveSimCmd.forwardmove = vDirection.x;
+				g_MoveSimCmd.sidemove = -vDirection.y;
+				g_MoveSimCmd.upmove = vDirection.z;
+				g_MoveSimCmd.viewangles = {};
+
+				SDK::FixMovement(&g_MoveSimCmd, {}, tMoveData.m_vecViewAngles);
+
+				tMoveData.m_flForwardMove = g_MoveSimCmd.forwardmove;
+				tMoveData.m_flSideMove = g_MoveSimCmd.sidemove;
+				tMoveData.m_flUpMove = g_MoveSimCmd.upmove;
+			}
+		}
+	}
+	// If velocity is zero but we have direction history, use the last known direction
+	// This helps when player is strafing and velocity momentarily drops
+	else if (!vRecords.empty() && !vRecords.front().m_vDirection.IsZero())
+	{
+		Vec3 vDirection = vRecords.front().m_vDirection;
+		
+		// Estimate view angles from last known direction
+		tMoveData.m_vecViewAngles = { 0.f, Math::VectorAngles(vDirection).y, 0.f };
+		
 		g_MoveSimCmd = {};
 		g_MoveSimCmd.forwardmove = vDirection.x;
 		g_MoveSimCmd.sidemove = -vDirection.y;
@@ -410,11 +573,6 @@ void CMovementSimulation::SetupMoveData(MoveStorage& tMoveStorage, bool bStrafe)
 		tMoveData.m_flSideMove = g_MoveSimCmd.sidemove;
 		tMoveData.m_flUpMove = g_MoveSimCmd.upmove;
 	}
-	else if (!pPlayer->m_vecVelocity().To2D().IsZero())
-	{
-		tMoveData.m_vecViewAngles = Math::VectorAngles(pPlayer->m_vecVelocity().To2D());
-		tMoveData.m_flForwardMove = tMoveData.m_flMaxSpeed;
-	}
 
 	tMoveData.m_vecAngles = tMoveData.m_vecViewAngles;
 	tMoveData.m_outStepHeight = 0.f;
@@ -426,6 +584,7 @@ void CMovementSimulation::SetupMoveData(MoveStorage& tMoveStorage, bool bStrafe)
 	tMoveStorage.m_flSimTime = pPlayer->m_flSimulationTime();
 	tMoveStorage.m_flPredictedDelta = GetPredictedDelta(pPlayer);
 	tMoveStorage.m_flPredictedSimTime = tMoveStorage.m_flSimTime + tMoveStorage.m_flPredictedDelta;
+	tMoveStorage.m_flTimeToTarget = tMoveStorage.m_flPredictedDelta;  // Initial estimate for ground yaw decay
 	tMoveStorage.m_vPredictedOrigin = tMoveData.m_vecAbsOrigin;
 	tMoveStorage.m_bDirectMove = IsOnGround(pPlayer) || GetMoveMode(pPlayer) == MoveMode::Swim || !bStrafe;
 }
@@ -467,6 +626,21 @@ float CMovementSimulation::GetAverageYaw(C_TFPlayer* pPlayer, int iSamples)
 		const int iTicks = std::max(TIME_TO_TICKS(flTimeDelta), 1);
 
 		float flYaw = Math::NormalizeAngle(YawFromVector(tCurrent.m_vDirection) - YawFromVector(tPrevious.m_vDirection));
+
+		// RijiN compression garbage cleaning: TF2's origin compression adds ~1.5 units
+		// of noise to positions, which creates small fake yaw deltas. Remove the bias:
+		// if yaw is positive, subtract the compression artifact; if negative, add it.
+		// Then zero out deltas below the threshold (0.3°) as they're just noise.
+		constexpr float COMPRESSION_GARBAGE = 1.507446f;
+		constexpr float YAW_DELTA_NOT_ENOUGH = 0.3f;
+		if (flYaw < 0.f)
+			flYaw += COMPRESSION_GARBAGE;
+		else if (flYaw > 0.f)
+			flYaw -= COMPRESSION_GARBAGE;
+
+		if (flYaw > -YAW_DELTA_NOT_ENOUGH && flYaw < YAW_DELTA_NOT_ENOUGH)
+			flYaw = 0.f;
+
 		if (std::fabs(flYaw) > 45.f)
 			break;
 
@@ -701,6 +875,11 @@ void CMovementSimulation::RunTick(MoveStorage& tMoveStorage, bool bPath, const R
 	I::Prediction->m_bInPrediction = true;
 	I::Prediction->m_bFirstTimePredicted = false;
 
+	// SEOwned: skip processing when velocity is negligible and on ground.
+	// Prevents the sim from drifting stationary players due to floating point noise.
+	if (tMoveStorage.m_MoveData.m_vecVelocity.Length() < 15.0f && IsOnGround(pPlayer))
+		return;
+
 	SetBounds(pPlayer);
 
 	float flCorrection = 0.f;
@@ -709,13 +888,52 @@ void CMovementSimulation::RunTick(MoveStorage& tMoveStorage, bool bPath, const R
 	if (tMoveStorage.m_flAverageYaw)
 	{
 		const bool bAir = !IsOnGround(pPlayer) && GetMoveMode(pPlayer) != MoveMode::Swim;
-		flCorrection = bAir && !pPlayer->InCond(TF_COND_SHIELD_CHARGE) ? 90.f * sign(tMoveStorage.m_flAverageYaw) : 0.f;
-		const float flFriction = bAir ? 1.f : GetFrictionScale(pPlayer);
-		tMoveStorage.m_MoveData.m_vecViewAngles.y += tMoveStorage.m_flAverageYaw * flFriction + flCorrection;
+
+		if (bAir)
+		{
+			// Air strafe: SEOwned/Amalgam pattern — 90° correction rotates view so
+			// strafe input curves the trajectory. Pure sidemove (no forward) matches
+			// how players actually air strafe in TF2.
+			flCorrection = pPlayer->InCond(TF_COND_SHIELD_CHARGE) ? 0.f : 90.f * sign(tMoveStorage.m_flAverageYaw);
+			tMoveStorage.m_MoveData.m_vecViewAngles.y += tMoveStorage.m_flAverageYaw + flCorrection;
+			tMoveStorage.m_MoveData.m_flForwardMove = 0.f;
+			tMoveStorage.m_MoveData.m_flSideMove = tMoveStorage.m_flAverageYaw > 0.f ? -450.f : 450.f;
+		}
+		else
+		{
+			// Ground strafe: SEOwned-style yaw decay — turn rate decreases as we approach target.
+			// RemapValClamped(timeToTarget, 0, 1, 1, 0.5) maps: at target=1s full rate, at target=0s half rate.
+			// This prevents over-turning at the end of the prediction window.
+			const float flFriction = GetFrictionScale(pPlayer);
+			const float flDecay = Math::RemapValClamped(tMoveStorage.m_flTimeToTarget, 0.0f, 1.0f, 1.0f, 0.5f);
+			tMoveStorage.m_MoveData.m_vecViewAngles.y += tMoveStorage.m_flAverageYaw * flFriction * flDecay;
+		}
 	}
 
 	if (IsDucking(pPlayer) && IsOnGround(pPlayer) && GetMoveMode(pPlayer) != MoveMode::Swim)
 		tMoveStorage.m_MoveData.m_flClientMaxSpeed /= 3.f;
+
+	// RijiN evasive friction: when ground player is rapidly changing direction,
+	// our strafe prediction is unreliable. Apply extra friction to slow the sim
+	// toward a more conservative (likely correct) position.
+	if (tMoveStorage.m_bEvasiveFriction && IsOnGround(pPlayer))
+	{
+		const float flSpeed = tMoveStorage.m_MoveData.m_vecVelocity.Length2D();
+		if (flSpeed > 0.f)
+		{
+			static ConVar* sv_friction = U::ConVars.FindVar("sv_friction");
+			static ConVar* sv_stopspeed = U::ConVars.FindVar("sv_stopspeed");
+			const float flFriction = sv_friction ? sv_friction->GetFloat() : 4.f;
+			const float flStopSpeed = sv_stopspeed ? sv_stopspeed->GetFloat() : 100.f;
+			const float flSurfaceFriction = pPlayer->m_surfaceFriction();
+			const float flNewSpeed = std::max(0.f, flSpeed - std::max(flSpeed, flStopSpeed) * (flFriction * flSurfaceFriction * TICK_INTERVAL));
+			if (flNewSpeed != flSpeed && flSpeed > 0.f)
+			{
+				tMoveStorage.m_MoveData.m_vecVelocity.x *= flNewSpeed / flSpeed;
+				tMoveStorage.m_MoveData.m_vecVelocity.y *= flNewSpeed / flSpeed;
+			}
+		}
+	}
 
 	if (tMoveStorage.m_bBunnyHop)
 	{
@@ -745,11 +963,26 @@ void CMovementSimulation::RunTick(MoveStorage& tMoveStorage, bool bPath, const R
 		(*pCallback)(tMoveStorage.m_MoveData);
 
 	tMoveStorage.m_flSimTime += TICK_INTERVAL;
+	tMoveStorage.m_flTimeToTarget = std::max(0.f, tMoveStorage.m_flTimeToTarget - TICK_INTERVAL);
 	tMoveStorage.m_bPredictNetworked = tMoveStorage.m_flSimTime >= tMoveStorage.m_flPredictedSimTime;
 	if (tMoveStorage.m_bPredictNetworked)
 	{
 		tMoveStorage.m_vPredictedOrigin = tMoveStorage.m_MoveData.m_vecAbsOrigin;
 		tMoveStorage.m_flPredictedSimTime += tMoveStorage.m_flPredictedDelta;
+	}
+
+	// RijiN: clamp ground velocity to max speed after ProcessMovement.
+	// The engine can sometimes produce velocities slightly above max speed
+	// due to floating point, and this accumulates over many ticks.
+	if (IsOnGround(pPlayer))
+	{
+		const float flSpeed = tMoveStorage.m_MoveData.m_vecVelocity.Length2D();
+		const float flMaxSpeed = tMoveStorage.m_MoveData.m_flMaxSpeed;
+		if (flSpeed > flMaxSpeed && flSpeed > 0.f)
+		{
+			tMoveStorage.m_MoveData.m_vecVelocity.x *= flMaxSpeed / flSpeed;
+			tMoveStorage.m_MoveData.m_vecVelocity.y *= flMaxSpeed / flSpeed;
+		}
 	}
 
 	const bool bLastDirectMove = tMoveStorage.m_bDirectMove;
@@ -788,6 +1021,15 @@ void CMovementSimulation::Restore(MoveStorage& tMoveStorage)
 	if (tMoveStorage.m_pPlayer)
 	{
 		RestoreBounds(tMoveStorage.m_pPlayer);
+
+		// Explicitly restore model scale and origin — these are rendered netvars
+		// that CPredictionCopy may not reliably restore, causing visible shrinking/disappearing
+		if (tMoveStorage.m_bHasBackup)
+		{
+			tMoveStorage.m_pPlayer->m_flModelScale() = tMoveStorage.m_flOldModelScale;
+			tMoveStorage.m_pPlayer->m_vecOrigin() = tMoveStorage.m_vOldOrigin;
+		}
+
 		tMoveStorage.m_pPlayer->SetCurrentCommand(nullptr);
 	}
 

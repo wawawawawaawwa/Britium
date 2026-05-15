@@ -548,9 +548,9 @@ void CAimbotMelee::Aim(CUserCmd* pCmd, C_TFPlayer* pLocal, C_TFWeaponBase* pWeap
 				pCmd->viewangles = vAngleTo;
 
 				if (Shifting::bShifting && Shifting::bShiftingWarp)
-					G::bSilentAngles = true;
+					G::bSilentAngles = true;  // Warp: choke handled by warp system
 
-				else G::bSilentAngles = true;
+				else G::bPSilentAngles = true;  // Fire tick: pSilent choke
 			}
 
 			break;

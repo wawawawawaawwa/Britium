@@ -321,10 +321,27 @@ MAKE_HOOK(IBaseClientDLL_FrameStageNotify, Memory::GetVFunc(I::BaseClientDLL, 35
 						I::GlobalVars->frametime = flAnimFrameTime;
 
 						G::bUpdatingAnims = true;
-						for (int j = 0; j < nDifference; j++)
+						
+						// Smart cap: only limit iterations when there's packet loss / high ping
+						// Normal case (nDifference = 1): zero overhead, no cap needed
+						// Problem case (nDifference > 1): cap to prevent frame spikes
+						if (nDifference == 1)
 						{
+							// Normal case: single tick advance (cheap, always do it)
 							pPlayer->UpdateClientSideAnimation();
 						}
+						else if (nDifference > 1)
+						{
+							// Packet loss / high ping: cap to prevent frame spikes
+							// High-ping players will catch up over multiple frames
+							constexpr int MAX_ANIM_ITERATIONS_PER_FRAME = 5;
+							const int nIterations = std::min(nDifference, MAX_ANIM_ITERATIONS_PER_FRAME);
+							for (int j = 0; j < nIterations; j++)
+							{
+								pPlayer->UpdateClientSideAnimation();
+							}
+						}
+						
 						G::bUpdatingAnims = false;
 
 						I::GlobalVars->frametime = flOldFrameTime;
@@ -374,6 +391,42 @@ MAKE_HOOK(IBaseClientDLL_FrameStageNotify, Memory::GetVFunc(I::BaseClientDLL, 35
 					CFG::Perf_Extreme_Low_Textures ||
 					CFG::Perf_Extreme_FPS_Limit > 0;
 
+				// Cache config state to avoid redundant convar operations when nothing changed
+				static bool s_bLastMinimalRender = false;
+				static bool s_bLastSkipWorld = false;
+				static bool s_bLastSkipShadows = false;
+				static bool s_bLastSkipParticles = false;
+				static bool s_bLastSkipDecals = false;
+				static bool s_bLastSkipTextures = false;
+				static bool s_bLastSkipEntities = false;
+				static bool s_bLastSkipSound = false;
+				static bool s_bLastLowTextures = false;
+				static int s_nLastFPSLimit = 0;
+
+				const bool bMinimalRender = CFG::Perf_Extreme_Minimal_Render;
+				const bool bSkipWorld = CFG::Perf_Extreme_Skip_World_Render || bMinimalRender;
+				const bool bSkipShadows = CFG::Perf_Extreme_Skip_Shadows || bMinimalRender;
+				const bool bSkipParticles = CFG::Perf_Extreme_Skip_Particles || bMinimalRender;
+				const bool bSkipDecals = CFG::Perf_Extreme_Skip_Decals || bMinimalRender;
+				const bool bSkipTextures = CFG::Perf_Extreme_Skip_World_Textures || bMinimalRender;
+				const bool bSkipEntities = CFG::Perf_Extreme_Skip_Unused_Entities || bMinimalRender;
+				const bool bSkipSound = CFG::Perf_Extreme_Skip_Sound || bMinimalRender;
+				const bool bLowTextures = CFG::Perf_Extreme_Low_Textures || bMinimalRender;
+				const int nFPSLimit = CFG::Perf_Extreme_FPS_Limit;
+
+				// Check if any config actually changed
+				const bool bConfigChanged =
+					bMinimalRender != s_bLastMinimalRender ||
+					bSkipWorld != s_bLastSkipWorld ||
+					bSkipShadows != s_bLastSkipShadows ||
+					bSkipParticles != s_bLastSkipParticles ||
+					bSkipDecals != s_bLastSkipDecals ||
+					bSkipTextures != s_bLastSkipTextures ||
+					bSkipEntities != s_bLastSkipEntities ||
+					bSkipSound != s_bLastSkipSound ||
+					bLowTextures != s_bLastLowTextures ||
+					nFPSLimit != s_nLastFPSLimit;
+
 				if (bAnyConvarOverride && !ConvarBackup::s_bCurrentlyOverriding)
 				{
 					// First time enabling: capture user's original values before we change anything.
@@ -386,18 +439,9 @@ MAKE_HOOK(IBaseClientDLL_FrameStageNotify, Memory::GetVFunc(I::BaseClientDLL, 35
 					ConvarBackup::s_bCurrentlyOverriding = true;
 				}
 
-				if (bAnyConvarOverride)
+				// Only apply convar changes if config actually changed
+				if (bAnyConvarOverride && bConfigChanged)
 				{
-					// Apply overrides based on which options are enabled
-					const bool bMinimalRender = CFG::Perf_Extreme_Minimal_Render;
-					const bool bSkipWorld = CFG::Perf_Extreme_Skip_World_Render || bMinimalRender;
-					const bool bSkipShadows = CFG::Perf_Extreme_Skip_Shadows || bMinimalRender;
-					const bool bSkipParticles = CFG::Perf_Extreme_Skip_Particles || bMinimalRender;
-					const bool bSkipDecals = CFG::Perf_Extreme_Skip_Decals || bMinimalRender;
-					const bool bSkipTextures = CFG::Perf_Extreme_Skip_World_Textures || bMinimalRender;
-					const bool bSkipEntities = CFG::Perf_Extreme_Skip_Unused_Entities || bMinimalRender;
-					const bool bSkipSound = CFG::Perf_Extreme_Skip_Sound || bMinimalRender;
-
 					if (bSkipWorld)
 					{
 						ConvarBackup::SetConvarInt(ConvarBackup::ConvarId::DrawWorld, 0);
@@ -448,7 +492,6 @@ MAKE_HOOK(IBaseClientDLL_FrameStageNotify, Memory::GetVFunc(I::BaseClientDLL, 35
 					// FPS limit: bypass engine min clamp (30) by temporarily removing the restriction.
 					if (const auto pFPSMax = ConvarBackup::GetConvar(ConvarBackup::ConvarId::FPSMax))
 					{
-						const int nFPSLimit = CFG::Perf_Extreme_FPS_Limit;
 						if (nFPSLimit > 0)
 						{
 							// Remove min clamp so values below 30 work
@@ -459,15 +502,39 @@ MAKE_HOOK(IBaseClientDLL_FrameStageNotify, Memory::GetVFunc(I::BaseClientDLL, 35
 					}
 
 					// Low textures: mat_picmip 2 = lowest quality, huge VRAM savings.
-					if (CFG::Perf_Extreme_Low_Textures || bMinimalRender)
+					if (bLowTextures)
 					{
 						ConvarBackup::SetConvarInt(ConvarBackup::ConvarId::Picmip, 2);
 					}
+
+					// Update cache
+					s_bLastMinimalRender = bMinimalRender;
+					s_bLastSkipWorld = bSkipWorld;
+					s_bLastSkipShadows = bSkipShadows;
+					s_bLastSkipParticles = bSkipParticles;
+					s_bLastSkipDecals = bSkipDecals;
+					s_bLastSkipTextures = bSkipTextures;
+					s_bLastSkipEntities = bSkipEntities;
+					s_bLastSkipSound = bSkipSound;
+					s_bLastLowTextures = bLowTextures;
+					s_nLastFPSLimit = nFPSLimit;
 				}
-				else if (ConvarBackup::s_bCurrentlyOverriding)
+				else if (ConvarBackup::s_bCurrentlyOverriding && !bAnyConvarOverride)
 				{
 					// All options disabled: restore user's original values exactly.
 					RestoreConvarBackups();
+					
+					// Reset cache
+					s_bLastMinimalRender = false;
+					s_bLastSkipWorld = false;
+					s_bLastSkipShadows = false;
+					s_bLastSkipParticles = false;
+					s_bLastSkipDecals = false;
+					s_bLastSkipTextures = false;
+					s_bLastSkipEntities = false;
+					s_bLastSkipSound = false;
+					s_bLastLowTextures = false;
+					s_nLastFPSLimit = 0;
 				}
 			}
 

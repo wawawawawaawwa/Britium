@@ -1087,12 +1087,24 @@ namespace SDK
         return static_cast<int>(SDKUtils::AttribHookValue(static_cast<float>(iBase), szAttr, pWeapon));
     }
     
-    // Max speed calculation
+    // Max speed calculation - matches Amalgam's SDK::MaxSpeed
+    // Includes speed boost conditions (whip, concheror, etc.)
     inline float MaxSpeed(C_TFPlayer* pPlayer, bool bIgnoreCrouch = false, bool bIgnoreSpecialAbility = false)
     {
         if (!pPlayer)
             return 0.f;
-        return pPlayer->TeamFortress_CalculateMaxSpeed(bIgnoreSpecialAbility);
+        
+        float flSpeed = pPlayer->TeamFortress_CalculateMaxSpeed(bIgnoreSpecialAbility);
+        
+        // Speed boost from whip/concheror/etc (Amalgam has this)
+        if (pPlayer->InCond(TF_COND_SPEED_BOOST) || pPlayer->InCond(TF_COND_HALLOWEEN_SPEED_BOOST))
+            flSpeed *= 1.35f;
+        
+        // Crouch slowdown on ground (Amalgam has this)
+        if (!bIgnoreCrouch && pPlayer->m_bDucked() && IsOnGround(pPlayer))
+            flSpeed /= 3.f;
+        
+        return flSpeed;
     }
     
     // Predicted shoot position accounting for pending duck state

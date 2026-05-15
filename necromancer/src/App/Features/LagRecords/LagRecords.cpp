@@ -180,38 +180,26 @@ void CLagRecords::AddRecord(C_TFPlayer* pPlayer)
 	if (bSetupBonesOpt)
 		pPlayer->InvalidateBoneCache();
 
-	// Use simulation time, NOT curtime — the record stores server-side position data
-	// (SimulationTime, AbsOrigin) that corresponds to the simtime, not the interpolated curtime position.
-	// For high-ping players, curtime bones are at the interpolated position which differs from
-	// the actual server position, causing lag records to jitter/tear.
-	const float flBoneTime = pPlayer->m_flSimulationTime();
-	const bool bResult = pPlayer->SetupBones(newRecord.BoneMatrix, 128, BONE_USED_BY_ANYTHING, flBoneTime);
-
-	// Invalidate bone cache after recording — the cache now has simtime bones,
-	// but the main model render needs curtime bones for smooth interpolation
-	pPlayer->InvalidateBoneCache();
+	// BONE_USED_BY_ANYTHING — must use full bone mask, not BONE_USED_BY_HITBOX.
+	// TF2's procedural bone controllers (IK, look-at) depend on bones outside the hitbox set.
+	// BONE_USED_BY_HITBOX skips these controllers, producing slightly different hitbox bone positions.
+	const bool bResult = pPlayer->SetupBones(newRecord.BoneMatrix, 128, BONE_USED_BY_ANYTHING, I::GlobalVars->curtime);
 
 	if (bSetupBonesOpt)
 	{
-		int nIterations = 0;
-		for (auto attach = pPlayer->FirstMoveChild(); attach; attach = attach->NextMovePeer())
+		// Re-setup attachment bones after player bone invalidation — without this,
+		// attachments (hats, weapons) render at stale positions for one frame because
+		// their bone cache still references the old player bone transforms.
+		auto attach = pPlayer->FirstMoveChild();
+		while (attach)
 		{
-			// Safety: limit iterations to prevent infinite loops on corrupted entity chains
-			if (++nIterations > 32)
-				break;
-
-			// Validate the attachment is a valid entity with a model
-			if (!attach->GetClientNetworkable() || !attach->GetClientNetworkable()->GetClientClass())
-				continue;
-
-			if (!attach->GetModel())
-				continue;
-
 			if (attach->ShouldDraw())
 			{
 				attach->InvalidateBoneCache();
 				attach->SetupBones(nullptr, -1, BONE_USED_BY_ANYTHING, I::GlobalVars->curtime);
 			}
+
+			attach = attach->NextMovePeer();
 		}
 	}
 
@@ -333,7 +321,10 @@ void CLagRecords::UpdateRecords()
 	}
 
 	// Iterate flat array by entity index - much faster than unordered_map iteration
-	for (int i = 0; i < MAX_LAG_RECORDS_SLOTS; i++)
+	// Only iterate up to GetMaxClients() instead of MAX_LAG_RECORDS_SLOTS (101)
+	// Typical servers: 24-32 players, saves 70-80 empty slot checks per frame
+	const int nMaxClients = I::EngineClient->GetMaxClients();
+	for (int i = 1; i <= nMaxClients; i++)
 	{
 		auto& records = m_LagRecords[i];
 		if (records.empty())
@@ -354,12 +345,25 @@ void CLagRecords::UpdateRecords()
 			continue;
 		}
 
-		// Remove individual invalid records
-		// No need to validate Player pointer per-record since we validated the entity index above
+		// Remove invalid records - optimized for ordered deque (newest first)
+		// Records are added with emplace_front(), so they're ordered by simtime (descending)
+		// Once we find an invalid record, all older records are also invalid
 		const float flCurSimTime = pPlayer->m_flSimulationTime();
-		std::erase_if(records, [flCurSimTime, this](const LagRecord_t& curRecord) {
-			return !F::LagRecords->IsSimulationTimeValid(flCurSimTime, curRecord.SimulationTime);
-		});
+		
+		// Find first invalid record (all records after it are also invalid)
+		size_t nFirstInvalid = records.size();
+		for (size_t j = 0; j < records.size(); j++)
+		{
+			if (!IsSimulationTimeValid(flCurSimTime, records[j].SimulationTime))
+			{
+				nFirstInvalid = j;
+				break;
+			}
+		}
+		
+		// Erase tail in one operation (much faster than std::erase_if)
+		if (nFirstInvalid < records.size())
+			records.erase(records.begin() + nFirstInvalid, records.end());
 	}
 }
 

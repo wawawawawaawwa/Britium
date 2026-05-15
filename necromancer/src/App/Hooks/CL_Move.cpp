@@ -19,6 +19,8 @@ MAKE_HOOK(CL_Move, Signatures::CL_Move.Get(), void, __fastcall,
 	// The rebuilt CL_Move has subtle differences in signon handling that can
 	// cause "Parsing game info" to hang indefinitely. Only use the rebuilt
 	// version when fully in-game for tick manipulation (shifting/recharging).
+	// blizzman here, only god and i know how this files work
+	// blizzman here, only god knows how this file works (hours spent fixing issues: 20H)
 	if (!I::ClientState->IsActive())
 	{
 		CALL_ORIGINAL(accumulated_extra_samples, bFinalTick);
@@ -26,10 +28,12 @@ MAKE_HOOK(CL_Move, Signatures::CL_Move.Get(), void, __fastcall,
 	}
 
 	// Apply ping reducer BEFORE anything else
+	// ping reducer good, maybe later i will incress the slider max
 	F::NetworkFix->ApplyPingReducer();
 	F::NetworkFix->ApplyAutoInterp();
 	
 	// Auto-queue
+	// not pasted from amalgam
 	F::AutoQueue->Run();
 
 	// Ping reducer fix
@@ -40,6 +44,7 @@ MAKE_HOOK(CL_Move, Signatures::CL_Move.Get(), void, __fastcall,
 	F::SeedPred->AskForPlayerPerf();
 
 	// Calculate max ticks based on anti-cheat and anti-aim state
+	// tried lerp angle more after silent aimbot fov 15, the idea works, just need a better AI and more fucks to give
 	int nMaxTicks;
 	if (CFG::Misc_AntiCheat_Enabled && !CFG::Misc_AntiCheat_IgnoreTickLimit)
 	{
@@ -59,6 +64,7 @@ MAKE_HOOK(CL_Move, Signatures::CL_Move.Get(), void, __fastcall,
 	nMaxTicks = std::min(nMaxTicks, nUserLimit);
 
 	// Deficit Compensation — reduce available ticks when server drops commands
+	// no idea what this does
 	if (F::Ticks->GetOptimalDeficitTracking() && Shifting::nDeficit > 0)
 	{
 		Shifting::nDeficit--;
@@ -67,14 +73,19 @@ MAKE_HOOK(CL_Move, Signatures::CL_Move.Get(), void, __fastcall,
 	}
 
 	// Handle recharging
-	if (Shifting::nAvailableTicks < nMaxTicks)
+	// When fast sticky sets a recharge target, stop at that count instead of the global max
+	const int nRechargeCap = (Shifting::nStickyRechargeTarget > 0) ? std::min(nMaxTicks, Shifting::nStickyRechargeTarget) : nMaxTicks;
+
+	if (Shifting::nAvailableTicks < nRechargeCap)
 	{
 		if (!Shifting::bRecharging && !Shifting::bShifting && !Shifting::bShiftingWarp && H::Entities->GetWeapon())
 		{
 			if (H::Input->IsDown(CFG::Exploits_Shifting_Recharge_Key))
 			{
 				if (!I::MatSystemSurface->IsCursorVisible() && !I::EngineVGui->IsGameUIVisible())
+				{
 					Shifting::bRecharging = true;
+				}
 			}
 		}
 
@@ -87,6 +98,9 @@ MAKE_HOOK(CL_Move, Signatures::CL_Move.Get(), void, __fastcall,
 	else
 	{
 		Shifting::bRecharging = false;
+		// Clear sticky recharge target once we've reached it
+		if (Shifting::nStickyRechargeTarget > 0 && Shifting::nAvailableTicks >= Shifting::nStickyRechargeTarget)
+			Shifting::nStickyRechargeTarget = 0;
 	}
 
 	auto callOriginal = [&](bool bFinal)
@@ -96,6 +110,7 @@ MAKE_HOOK(CL_Move, Signatures::CL_Move.Get(), void, __fastcall,
 	};
 
 	// RapidFire/DoubleTap shifting
+	// not working, i hate DT code
 	if (Shifting::bRapidFireWantShift)
 	{
 		Shifting::bRapidFireWantShift = false;
@@ -115,6 +130,7 @@ MAKE_HOOK(CL_Move, Signatures::CL_Move.Get(), void, __fastcall,
 		}
 
 		// Track how many commands we sent for deficit detection
+		// dont think this does anything useful but im not removing this, yet
 		Shifting::OnCommandsSent(nTicks);
 
 		Shifting::bShifting = false;
@@ -125,7 +141,7 @@ MAKE_HOOK(CL_Move, Signatures::CL_Move.Get(), void, __fastcall,
 		return;
 	}
 
-	// Sticky DT shifting
+	// Sticky DT shifting, working, not great sometimes, needs some improvements since we switched to cl_moverebuild
 	if (Shifting::bStickyDTWantShift)
 	{
 		Shifting::bStickyDTWantShift = false;
@@ -146,6 +162,7 @@ MAKE_HOOK(CL_Move, Signatures::CL_Move.Get(), void, __fastcall,
 		}
 
 		// Track how many commands we sent for deficit detection
+		// huh? why
 		Shifting::OnCommandsSent(nTicks);
 
 		Shifting::bShifting = false;

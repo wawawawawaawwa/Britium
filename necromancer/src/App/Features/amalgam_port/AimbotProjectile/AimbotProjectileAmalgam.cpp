@@ -8,6 +8,14 @@
 #include "../Ticks/Ticks.h"
 #include "../../Players/Players.h"
 
+namespace
+{
+	bool CanInterruptReload(C_TFWeaponBase* pWeapon)
+	{
+		return pWeapon && pWeapon->HasPrimaryAmmoForShot() && pWeapon->m_iClip1() > 0 && pWeapon->IsInReload() && pWeapon->m_bReloadsSingly();
+	}
+}
+
 std::vector<Target_t> CAmalgamAimbotProjectile::GetTargets(C_TFPlayer* pLocal, C_TFWeaponBase* pWeapon)
 {
 	std::vector<Target_t> vTargets;
@@ -123,9 +131,8 @@ std::vector<Target_t> CAmalgamAimbotProjectile::SortTargets(C_TFPlayer* pLocal, 
 			return a.m_flDistTo < b.m_flDistTo;
 	});
 
-	// Limit to max targets
-	const size_t nMaxTargets = std::min(static_cast<size_t>(CFG::Aimbot_Projectile_Max_Processing_Targets), vTargets.size());
-	vTargets.resize(nMaxTargets);
+	// NOTE: Max target limiting is now done in RunMain() BEFORE CanHit() calculations
+	// to avoid unnecessary processing of multiple targets when max is set to 1
 	
 	return vTargets;
 }
@@ -909,10 +916,10 @@ int CAmalgamAimbotProjectile::CanHit(Target_t& tTarget, CTFPlayer* pLocal, CTFWe
 	m_tInfo.m_iSplashMode = GetSplashMode(pWeapon);
 
 	int iReturn = false;
-	float flMaxSimTime = std::min(std::min(tProjInfo.m_flLifetime, Vars::Aimbot::Projectile::MaxSimulationTime.Value), 5.0f);
+	float flMaxSimTime = std::min(std::min(tProjInfo.m_flLifetime, Vars::Aimbot::Projectile::MaxSimulationTime.Value), 7.0f);
 	int iMaxTime = TIME_TO_TICKS(flMaxSimTime);
-	if (iMaxTime > 330)
-		iMaxTime = 330;
+	if (iMaxTime > 462)
+		iMaxTime = 462;
 	
 	int iSplash = Vars::Aimbot::Projectile::SplashPrediction.Value && m_tInfo.m_flRadius ? Vars::Aimbot::Projectile::SplashPrediction.Value : Vars::Aimbot::Projectile::SplashPredictionEnum::Off;
 	int iMulti = Vars::Aimbot::Projectile::SplashMode.Value;
@@ -1249,14 +1256,18 @@ void CAmalgamAimbotProjectile::Aim(CUserCmd* pCmd, Vec3& vAngle, int iMethod, bo
 		I::EngineClient->SetViewAngles(vOut);
 		break;
 	case Vars::Aimbot::General::AimTypeEnum::Silent:
-		// Silent — only choke packet (pSilent) when actually firing.
+		// Silent — only choke packet (pSilent) when actually firing AND not reloading.
+		// pSilent during reload is unreliable - the reload may progress past interrupt point.
+		// Amalgam returns G::Attacking=2 during reload, which doesn't trigger pSilent.
 		H::AimUtils->FixMovement(pCmd, vOut);
 		pCmd->viewangles = vOut;
 
 		if (Shifting::bShifting && Shifting::bShiftingWarp)
 			G::bSilentAngles = true;  // Warp: choke handled by warp system
-		else if (bIsFiring)
-			G::bSilentAngles = true;  // Firing tick: silent aim, restore view next tick
+		else if (bIsFiring && !G::bReloading)
+			G::bPSilentAngles = true;  // Firing tick (not during reload): pSilent choke
+		else if (bIsFiring && G::bReloading)
+			G::bSilentAngles = true;  // Firing during reload: use silent but don't choke
 		else
 			G::bSilentAngles = true;  // Not firing: just hide local view, no choke
 		break;
@@ -1295,119 +1306,217 @@ bool CAmalgamAimbotProjectile::RunMain(C_TFPlayer* pLocal, C_TFWeaponBase* pWeap
 	
 	// Check aimbot key (skip if Always On is enabled)
 	if (!CFG::Aimbot_Always_On && CFG::Aimbot_Key != 0 && !H::Input->IsDown(CFG::Aimbot_Key))
+	{
+		m_iCachedResult = 0;
+		m_bPredictionSession = false;
+		m_bWasReadyToFire = false;
+		m_pCachedEntity = nullptr;       // null out to prevent dangling pointer
+		m_iCachedTargetIndex = 0;
+		m_vCachedProjectilePath.clear();
+		m_vCachedPlayerPath.clear();
 		return false;
+	}
 	
 	// Check aim type is enabled (0=Plain, 1=Silent)
-	// Vars::Aimbot::General::AimType maps CFG to Amalgam enum
 	if (CFG::Aimbot_Projectile_Aim_Type < 0)
 		return false;
 
-	auto vTargets = SortTargets(pLocal, pWeapon);
-	if (vTargets.empty())
-		return false;
+	// Throttle expensive prediction (SortTargets + CanHit) to ~17Hz.
+	// Force fresh prediction when weapon just became ready to fire (transition tick)
+	// so we have accurate angles for the shot. On other can-fire ticks, cached is fine.
+	const int nPredictInterval = TIME_TO_TICKS(1.0f / 17.0f); // ~59ms = ~17Hz at 66tick
 
-	if (!G::AimTarget.m_iEntIndex && vTargets.front().m_pEntity && H::Entities->IsEntityValid(vTargets.front().m_pEntity))
-		G::AimTarget = { vTargets.front().m_pEntity->entindex(), I::GlobalVars->tickcount, 0 };
+	// Check if weapon can fire now
+	const int nSavedTickBase = pLocal->m_nTickBase();
+	pLocal->m_nTickBase() = nSavedTickBase + 1;
+	const bool bCanFireNow = pWeapon->CanPrimaryAttack(pLocal) && pWeapon->HasPrimaryAmmoForShot();
+	pLocal->m_nTickBase() = nSavedTickBase;
+	const bool bCanInterruptReload = CanInterruptReload(pWeapon);
+	const bool bCanFire = bCanFireNow || bCanInterruptReload;
 
-	for (auto& tTarget : vTargets)
+	// Force prediction on the tick the weapon BECOMES ready (transition from can't-fire to can-fire)
+	// This ensures fresh angles for the first shot opportunity without running prediction every can-fire tick
+	const bool bJustBecameReady = bCanFire && !m_bWasReadyToFire;
+	m_bWasReadyToFire = bCanFire;
+
+	const bool bShouldPredict = bJustBecameReady || (I::GlobalVars->tickcount - m_nLastPredictTick >= nPredictInterval) || !m_bPredictionSession;
+
+	if (bShouldPredict)
 	{
-		// Validate entity is still alive — may have been destroyed since target selection
-		if (!tTarget.m_pEntity || !H::Entities->IsEntityValid(tTarget.m_pEntity))
-			continue;
-		m_flTimeTo = std::numeric_limits<float>::max();
-		m_vPlayerPath.clear(); m_vProjectilePath.clear(); m_vBoxes.clear();
+		m_nLastPredictTick = I::GlobalVars->tickcount;
+		m_iCachedResult = 0;
+		m_pCachedEntity = nullptr;       // clear stale cache — prevent use on next non-predict tick
+		m_iCachedTargetIndex = 0;
+		m_bPredictionSession = true; // mark session started even if no target found
 
-		const int iResult = CanHit(tTarget, pLocal, pWeapon);
-		if (!iResult) 
-			continue;
-		if (iResult == 2)
+		auto vTargets = SortTargets(pLocal, pWeapon);
+		if (vTargets.empty())
+			return false;
+
+		const int nMaxTargets = CFG::Aimbot_Projectile_Max_Processing_Targets;
+		if (static_cast<int>(vTargets.size()) > nMaxTargets)
+			vTargets.resize(nMaxTargets);
+
+		if (!G::AimTarget.m_iEntIndex && vTargets.front().m_pEntity && H::Entities->IsEntityValid(vTargets.front().m_pEntity))
+			G::AimTarget = { vTargets.front().m_pEntity->entindex(), I::GlobalVars->tickcount, 0 };
+
+		for (auto& tTarget : vTargets)
 		{
-			G::AimTarget = { tTarget.m_pEntity->entindex(), I::GlobalVars->tickcount, 0 };
-			G::nTargetIndex = tTarget.m_pEntity->entindex();
-			G::nTargetIndexEarly = tTarget.m_pEntity->entindex();
-			// For smooth/assistive aim (iResult == 2), always apply angles
-			Aim(pCmd, tTarget.m_vAngleTo, Vars::Aimbot::General::AimType.Value, true);
+			if (!tTarget.m_pEntity || !H::Entities->IsEntityValid(tTarget.m_pEntity))
+				continue;
+			m_flTimeTo = std::numeric_limits<float>::max();
+			m_vPlayerPath.clear(); m_vProjectilePath.clear(); m_vBoxes.clear();
+
+			const int iResult = CanHit(tTarget, pLocal, pWeapon);
+			if (!iResult)
+				continue;
+
+			// Cache prediction result for intermediate ticks
+			m_iCachedResult = iResult;
+			m_iCachedTargetIndex = tTarget.m_pEntity->entindex();
+			m_pCachedEntity = tTarget.m_pEntity;
+			m_vCachedAngleTo = tTarget.m_vAngleTo;
+			m_vCachedTargetPos = tTarget.m_vPos;
+			m_vCachedProjectilePath = m_vProjectilePath;
+			m_vCachedPlayerPath = m_vPlayerPath;
+
+			if (iResult == 2)
+			{
+				G::AimTarget = { tTarget.m_pEntity->entindex(), I::GlobalVars->tickcount, 0 };
+				G::nTargetIndex = tTarget.m_pEntity->entindex();
+				G::nTargetIndexEarly = tTarget.m_pEntity->entindex();
+				Aim(pCmd, tTarget.m_vAngleTo, Vars::Aimbot::General::AimType.Value, true);
+			}
+			else
+			{
+				G::AimTarget = { tTarget.m_pEntity->entindex(), I::GlobalVars->tickcount };
+				G::nTargetIndex = tTarget.m_pEntity->entindex();
+				G::nTargetIndexEarly = tTarget.m_pEntity->entindex();
+				G::AimPoint = { tTarget.m_vPos, I::GlobalVars->tickcount };
+			}
 			break;
 		}
 
-		G::AimTarget = { tTarget.m_pEntity->entindex(), I::GlobalVars->tickcount };
-		G::nTargetIndex = tTarget.m_pEntity->entindex();
-		G::nTargetIndexEarly = tTarget.m_pEntity->entindex();
-		G::AimPoint = { tTarget.m_vPos, I::GlobalVars->tickcount };
+		if (!m_iCachedResult)
+			return false;
+	}
+	else
+	{
+		// Non-prediction tick: validate cached target is still alive
+		bool bCacheValid = m_pCachedEntity && H::Entities->SafeIsEntityValid(m_pCachedEntity, m_iCachedTargetIndex);
 
-		if (CFG::Aimbot_AutoShoot && !G::bAutoScopeWaitActive)
+		// Check if entity is dead/dormant (still in list but not a valid target)
+		// Must check type via GetClassId before casting — As<T>() is static_cast
+		// and casting a building to C_TFPlayer is UB (unrelated hierarchy).
+		if (bCacheValid)
 		{
-			pCmd->buttons |= IN_ATTACK;
-			if (pWeapon->m_iItemDefinitionIndex() == Soldier_m_TheBeggarsBazooka)
+			const auto eClassId = m_pCachedEntity->GetClassId();
+
+			if (eClassId == ETFClassIds::CTFPlayer)
 			{
-				if (pWeapon->m_iClip1() > 0)
-					pCmd->buttons &= ~IN_ATTACK;
+				const auto pPlayer = static_cast<C_TFPlayer*>(m_pCachedEntity);
+				if (pPlayer->deadflag() || pPlayer->IsDormant())
+					bCacheValid = false;
+			}
+			else if (eClassId == ETFClassIds::CObjectSentrygun || eClassId == ETFClassIds::CObjectDispenser || eClassId == ETFClassIds::CObjectTeleporter)
+			{
+				const auto pBuilding = static_cast<C_BaseObject*>(m_pCachedEntity);
+				if (pBuilding->m_iHealth() <= 0 || pBuilding->m_bCarried() || pBuilding->m_bPlacing() || pBuilding->IsDormant())
+					bCacheValid = false;
+			}
+			else
+			{
+				// Unknown entity type — invalidate cache
+				bCacheValid = false;
 			}
 		}
 
-		// Re-check CanPrimaryAttack with the PREDICTED tickbase.
-		// G::bCanPrimaryAttack was set before EnginePrediction::Start() and can be
-		// stale — the weapon's m_flNextPrimaryAttack may have expired by the predicted
-		// curtime, meaning the server WILL fire the rocket, but we'd skip applying
-		// aimbot angles because bIsFiring was false. This caused rockets to shoot
-		// at the current view direction instead of the aimbot target.
-		const bool bCanFireNow = pWeapon->CanPrimaryAttack(pLocal) && pWeapon->HasPrimaryAmmoForShot();
-		const bool bIsFiring = (pCmd->buttons & IN_ATTACK) && bCanFireNow;
-		
-		F::AmalgamAimbot.m_bRan = G::Attacking = SDK::IsAttacking(pLocal, pWeapon, pCmd, true);
-		G::bFiring = bIsFiring;
-
-		// Draw paths only on the actual firing tick
-		// Track when we transition from "can't fire" to "firing" to detect actual shots
-		static bool bWasFiring = false;
-		static int nLastDrawTick = 0;
-		bool bFiringNow = (G::Attacking == 1);
-		bool bJustFired = bFiringNow && !bWasFiring;
-		bWasFiring = bFiringNow;
-		
-		// Only draw on the tick we actually fire, or if enough time has passed since last draw
-		if (bJustFired || (bFiringNow && I::GlobalVars->tickcount - nLastDrawTick > 66)) // ~1 second between redraws if holding
+		if (!bCacheValid)
 		{
-			// Clear previous overlays
-			I::DebugOverlay->ClearAllOverlays();
-			nLastDrawTick = I::GlobalVars->tickcount;
-			
-			// Draw movement path
-			if (CFG::Visuals_Draw_Movement_Path_Style > 0 && !m_vPlayerPath.empty())
-			{
-				const auto& col = CFG::Color_Simulation_Movement;
-				const int r = col.r, g = col.g, b = col.b;
-
-				for (size_t n = 1; n < m_vPlayerPath.size(); n++)
-				{
-					if (CFG::Visuals_Draw_Movement_Path_Style == 2 && n % 2 == 0)
-						continue;
-					I::DebugOverlay->AddLineOverlay(m_vPlayerPath[n], m_vPlayerPath[n - 1], r, g, b, false, 2.0f);
-				}
-			}
-
-			// Draw projectile path
-			if (CFG::Visuals_Draw_Predicted_Path_Style > 0 && !m_vProjectilePath.empty())
-			{
-				const auto& col = CFG::Color_Simulation_Projectile;
-				const int r = col.r, g = col.g, b = col.b;
-
-				for (size_t n = 1; n < m_vProjectilePath.size(); n++)
-				{
-					if (CFG::Visuals_Draw_Predicted_Path_Style == 2 && n % 2 == 0)
-						continue;
-					I::DebugOverlay->AddLineOverlay(m_vProjectilePath[n], m_vProjectilePath[n - 1], r, g, b, false, 2.0f);
-				}
-			}
+			// Cache is stale/invalid — clear everything and force predict next tick
+			m_iCachedResult = 0;
+			m_pCachedEntity = nullptr;
+			m_iCachedTargetIndex = 0;
+			m_nLastPredictTick = 0;
+			return false;
 		}
 
-		// Dodge prediction removed with behavior system removal
-
-		Aim(pCmd, tTarget.m_vAngleTo, Vars::Aimbot::General::AimType.Value, bIsFiring);
-		return true;
+		// Update global aim target from cache
+		G::nTargetIndex = m_iCachedTargetIndex;
+		G::nTargetIndexEarly = m_iCachedTargetIndex;
+		if (m_iCachedResult == 2)
+		{
+			G::AimTarget = { m_iCachedTargetIndex, I::GlobalVars->tickcount, 0 };
+			Aim(pCmd, m_vCachedAngleTo, Vars::Aimbot::General::AimType.Value, true);
+		}
+		else
+		{
+			G::AimTarget = { m_iCachedTargetIndex, I::GlobalVars->tickcount };
+			G::AimPoint = { m_vCachedTargetPos, I::GlobalVars->tickcount };
+		}
 	}
 
-	return false;
+	// Firing logic runs every tick — cheap checks using cached prediction
+	// bCanFireNow and bCanInterruptReload already computed above for throttle decision
+	const bool bOldCanPrimaryAttack = G::bCanPrimaryAttack;
+	G::bCanPrimaryAttack = bCanFireNow || bCanInterruptReload;
+
+	if (CFG::Aimbot_AutoShoot && !G::bAutoScopeWaitActive && (bCanFireNow || bCanInterruptReload))
+	{
+		pCmd->buttons |= IN_ATTACK;
+		if (pWeapon->m_iItemDefinitionIndex() == Soldier_m_TheBeggarsBazooka)
+		{
+			if (pWeapon->m_iClip1() > 0)
+				pCmd->buttons &= ~IN_ATTACK;
+		}
+	}
+
+	const bool bIsFiring = (pCmd->buttons & IN_ATTACK) && (bCanFireNow || bCanInterruptReload);
+
+	F::AmalgamAimbot.m_bRan = G::Attacking = SDK::IsAttacking(pLocal, pWeapon, pCmd, true);
+	G::bFiring = bIsFiring;
+	G::bCanPrimaryAttack = bOldCanPrimaryAttack;
+
+	// Apply aimbot angles when actually firing (autoshoot) or always (manual fire)
+	// Smooth/assistive (cached result 2) already called Aim() above
+	if (m_iCachedResult != 2 && (bIsFiring || !CFG::Aimbot_AutoShoot))
+	{
+		Aim(pCmd, m_vCachedAngleTo, Vars::Aimbot::General::AimType.Value, bIsFiring);
+	}
+
+	// Draw paths using cached prediction data
+	if (bIsFiring && !m_vCachedProjectilePath.empty())
+	{
+		I::DebugOverlay->ClearAllOverlays();
+
+		if (CFG::Visuals_Draw_Movement_Path_Style > 0 && !m_vCachedPlayerPath.empty())
+		{
+			const auto& col = CFG::Color_Simulation_Movement;
+			const int r = col.r, g = col.g, b = col.b;
+
+			for (size_t n = 1; n < m_vCachedPlayerPath.size(); n++)
+			{
+				if (CFG::Visuals_Draw_Movement_Path_Style == 2 && n % 2 == 0)
+					continue;
+				I::DebugOverlay->AddLineOverlay(m_vCachedPlayerPath[n], m_vCachedPlayerPath[n - 1], r, g, b, false, 2.0f);
+			}
+		}
+
+		if (CFG::Visuals_Draw_Predicted_Path_Style > 0)
+		{
+			const auto& col = CFG::Color_Simulation_Projectile;
+			const int r = col.r, g = col.g, b = col.b;
+
+			for (size_t n = 1; n < m_vCachedProjectilePath.size(); n++)
+			{
+				if (CFG::Visuals_Draw_Predicted_Path_Style == 2 && n % 2 == 0)
+					continue;
+				I::DebugOverlay->AddLineOverlay(m_vCachedProjectilePath[n], m_vCachedProjectilePath[n - 1], r, g, b, false, 2.0f);
+			}
+		}
+	}
+
+	return true;
 }
 
 void CAmalgamAimbotProjectile::Run(C_TFPlayer* pLocal, C_TFWeaponBase* pWeapon, CUserCmd* pCmd)

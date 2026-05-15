@@ -355,6 +355,9 @@ void CFakeAngle::FakeShotAngles(C_TFPlayer* pLocal, C_TFWeaponBase* pWeapon, CUs
 	// Require main anti-aim toggle to be enabled
 	if (!CFG::Exploits_AntiAim_Enabled)
 		return;
+
+	if (G::bPSilentAngles)
+		return;
 	
 	// Don't use with Legit AA - it has its own approach
 	if (CFG::Exploits_LegitAA_Enabled)

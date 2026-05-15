@@ -288,6 +288,33 @@ void CFakeLag::Run(C_TFPlayer* pLocal, C_TFWeaponBase* pWeapon, CUserCmd* pCmd, 
 	if (!m_iGoal)
 		m_iGoal = 22;
 	
+	// Post-shift cooldown: after sending shifted commands, wait a few ticks before choking again
+	// This prevents overchoke when the server is still processing the burst
+	static int nPostShiftCooldown = 0;
+	static bool bWasShifting = false;
+	
+	if (Shifting::bShifting || Shifting::bShiftingWarp || Shifting::bRecharging)
+	{
+		bWasShifting = true;
+		nPostShiftCooldown = 0;
+	}
+	else if (bWasShifting)
+	{
+		// Just finished shifting - set cooldown based on how many ticks were shifted
+		// More ticks shifted = longer cooldown needed
+		nPostShiftCooldown = std::min(Shifting::nTotalShiftTicks, 3);
+		bWasShifting = false;
+	}
+	
+	if (nPostShiftCooldown > 0)
+	{
+		nPostShiftCooldown--;
+		m_iGoal = 0;
+		m_vLastPosition = pLocal->m_vecOrigin();
+		m_bEnabled = false;
+		return;
+	}
+	
 	// Check for new entities and force unchoke
 	static int nLastPlayerCount = 0;
 	int nCurrentPlayerCount = 0;
@@ -420,6 +447,10 @@ void CFakeLag::Run(C_TFPlayer* pLocal, C_TFWeaponBase* pWeapon, CUserCmd* pCmd, 
 
 	*pSendPacket = false;
 	m_bEnabled = true;
+	
+	// Update last position every tick while choking (for adaptive mode distance check)
+	// This prevents distance from accumulating over multiple choke cycles
+	m_vLastPosition = pLocal->m_vecOrigin();
 }
 
 // Called after Run() to set the draw chams flag based on actual fakelag state

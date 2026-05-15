@@ -50,6 +50,17 @@ class CAimbotProjectile
 	bool m_bChargePending = false;  // True if we started a charge and need to release
 	int m_iCancelWeaponIdx = 0;     // Weapon index to switch back to after cancel
 
+	// Prediction throttle — full prediction runs at throttled rate,
+	// cached result used on intermediate ticks for cheap aim/firing/draw
+	int m_nLastPredictTick = 0;
+	bool m_bPredictionSession = false; // true after first prediction attempt (even if no target)
+	bool m_bWasReadyToFire = false;   // tracks can-fire transition for force-predict
+	bool m_bCachedHasTarget = false;
+	int m_iCachedTargetIndex = 0;     // stored index for SafeIsEntityValid (prevents UAF on dangling Entity ptr)
+	int m_iCachedWeaponID = 0;        // detect weapon switch between projectile weapons
+	ProjTarget_t m_CachedTarget = {};
+	std::vector<Vec3> m_vCachedTargetPath = {};
+
 	bool GetProjectileInfo(C_TFWeaponBase* pWeapon);
 	void UpdateArcCache(C_TFWeaponBase* pWeapon);
 	bool CalcProjAngle(C_TFPlayer* pLocal, C_TFWeaponBase* pWeapon, const Vec3& vFrom, const Vec3& vTo, Vec3& vAngleOut, float& flTimeOut, bool bLob = false);

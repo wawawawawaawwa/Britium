@@ -39,6 +39,11 @@ namespace
 	{
 		return fabsf(a - b) <= 0.001f;
 	}
+
+	bool CanInterruptReload(C_TFWeaponBase* pWeapon)
+	{
+		return pWeapon && pWeapon->HasPrimaryAmmoForShot() && pWeapon->m_iClip1() > 0 && pWeapon->IsInReload() && pWeapon->m_bReloadsSingly();
+	}
 }
 
 void DrawProjPath(const CUserCmd* pCmd, float time)
@@ -621,7 +626,7 @@ bool CAimbotProjectile::CalcProjAngle(C_TFPlayer* pLocal, C_TFWeaponBase* pWeapo
 			return false;
 		else if (m_CurProjInfo.ItemDef == Demoman_m_TheIronBomber && flTimeOut > 1.4f)
 			return false;
-		else if (flTimeOut > 2.0f)
+		else if (flTimeOut > 2.3f)
 			return false;
 	}
 
@@ -946,7 +951,7 @@ bool CAimbotProjectile::SolveTarget(C_TFPlayer* pLocal, C_TFWeaponBase* pWeapon,
 {
 	Vec3 vLocalPos = pLocal->GetShootPos();
 	const int nWeaponID = m_CurProjInfo.WeaponID;
-	const int nMaxSimTicks = TIME_TO_TICKS(CFG::Aimbot_Projectile_Max_Simulation_Time);
+	const int nMaxSimTicks = TIME_TO_TICKS(std::min(CFG::Aimbot_Projectile_Max_Simulation_Time, 7.0f));
 	const float flLatency = SDKUtils::GetLatency();
 	const bool bIsSticky = nWeaponID == TF_WEAPON_PIPEBOMBLAUNCHER;
 	const float flStickyArmTime = bIsSticky ? SDKUtils::AttribHookValue(0.8f, "sticky_arm_time", pLocal) : 0.0f;
@@ -1026,7 +1031,8 @@ bool CAimbotProjectile::SolveTarget(C_TFPlayer* pLocal, C_TFWeaponBase* pWeapon,
 				const float flRotation = static_cast<float>(I::GlobalVars->tickcount % 360) * DEG2RAD(1.0f);
 				const float flSinRotation = sinf(flRotation);
 				const float flCosRotation = cosf(flRotation);
-				const int nSplashPointCount = GetSplashPointCount();
+				// Sticky launcher lob/high arc: halve splash points — arc is less precise, fewer points suffice
+				const int nSplashPointCount = bIsSticky ? std::max(GetSplashPointCount() / 2, 50) : GetSplashPointCount();
 
 				// Stack array instead of heap vector — avoids allocation per call
 				Vec3 potential[MaxSplashPointCount];
@@ -1216,6 +1222,9 @@ bool CAimbotProjectile::SolveTarget(C_TFPlayer* pLocal, C_TFWeaponBase* pWeapon,
 
 				for (int nTick = 0; nTick < nMaxSimTicks; nTick++)
 				{
+					// Build the path for visualization
+					m_TargetPath.push_back(F::MovementSimulation->GetOrigin());
+
 					if (!bLobStationary)
 						F::MovementSimulation->RunTick();
 
@@ -1235,7 +1244,7 @@ bool CAimbotProjectile::SolveTarget(C_TFPlayer* pLocal, C_TFWeaponBase* pWeapon,
 					if (bIsSticky && flTimeLob < flStickyArmTime)
 						continue;
 
-					if (flTimeLob > CFG::Aimbot_Projectile_Max_Simulation_Time)
+					if (flTimeLob > std::min(CFG::Aimbot_Projectile_Max_Simulation_Time, 7.0f))
 						continue;
 
 					// The predicted tick must match the flight time
@@ -1251,8 +1260,6 @@ bool CAimbotProjectile::SolveTarget(C_TFPlayer* pLocal, C_TFWeaponBase* pWeapon,
 
 					if (CanSee(pLocal, pWeapon, vLocalPos, vLobTarget, target, flTimeLob))
 					{
-						if (m_TargetPath.size() < 2)
-							m_TargetPath.push_back(vLobTarget);
 						F::MovementSimulation->Restore();
 						return true;
 					}
@@ -1302,7 +1309,8 @@ bool CAimbotProjectile::SolveTarget(C_TFPlayer* pLocal, C_TFWeaponBase* pWeapon,
 				const float flRotation = static_cast<float>(I::GlobalVars->tickcount % 360) * DEG2RAD(1.0f);
 				const float flSinRotation = sinf(flRotation);
 				const float flCosRotation = cosf(flRotation);
-				const int nSplashPointCount = GetSplashPointCount();
+				// Sticky launcher lob/high arc: halve splash points — arc is less precise, fewer points suffice
+				const int nSplashPointCount = bIsSticky ? std::max(GetSplashPointCount() / 2, 50) : GetSplashPointCount();
 
 				Vec3 potential[MaxSplashPointCount];
 				int nPotentialCount = 0;
@@ -1551,21 +1559,16 @@ bool CAimbotProjectile::GetTarget(C_TFPlayer* pLocal, C_TFWeaponBase* pWeapon, c
 	// Sort by target priority
 	F::AimbotCommon->Sort(m_vecTargets, nSortMode);
 
-	const auto maxTargets{ std::min(CFG::Aimbot_Projectile_Max_Processing_Targets, static_cast<int>(m_vecTargets.size())) };
-	auto targetsScanned{ 0 };
-
+	// OPTIMIZATION: Resize vector to max targets AFTER sorting to avoid processing extras
+	// This prevents unnecessary SolveTarget() calls on targets we'll never use
+	const int nMaxTargets = CFG::Aimbot_Projectile_Max_Processing_Targets;
+	if (static_cast<int>(m_vecTargets.size()) > nMaxTargets)
+		m_vecTargets.resize(nMaxTargets);
+	
+	// Process only the targets we kept after resize
 	for (auto& target : m_vecTargets)
 	{
-		if (targetsScanned >= maxTargets)
-			break;
-
-		targetsScanned++;
-
 		if (!SolveTarget(pLocal, pWeapon, pCmd, target))
-			continue;
-
-		// FOV check — skip for lob angles since they aim steeply upward and will always fail normal FOV
-		if (bSortByFOV && target.AngleTo.x > -45.0f && Math::CalcFov(vLocalAngles, target.AngleTo) > flFOVLimit)
 			continue;
 
 		outTarget = target;
@@ -1607,8 +1610,10 @@ void CAimbotProjectile::Aim(CUserCmd* pCmd, C_TFPlayer* pLocal, C_TFWeaponBase* 
 	case 1:
 	{
 		// Silent — apply aimbot angles, hide from local view.
-		// Only use pSilent (packet choke) when actually firing.
-		// When not firing, use normal silent (just hide local view).
+		// Only use pSilent (packet choke) when actually firing AND not reloading.
+		// pSilent during reload is unreliable - by the time the choked packet reaches
+		// the server, the reload animation may have progressed past the interrupt point.
+		// Amalgam returns G::Attacking=2 during reload, which doesn't trigger pSilent.
 		H::AimUtils->FixMovement(pCmd, vAngleTo);
 		pCmd->viewangles = vAngleTo;
 
@@ -1616,8 +1621,10 @@ void CAimbotProjectile::Aim(CUserCmd* pCmd, C_TFPlayer* pLocal, C_TFWeaponBase* 
 			G::bSilentAngles = true;  // Flamethrower: continuous, never choke
 		else if (Shifting::bShifting && Shifting::bShiftingWarp)
 			G::bSilentAngles = true;  // Warp: choke handled by warp system
-		else if (G::bFiring)
-			G::bSilentAngles = true;  // Firing tick: silent aim, restore view next tick
+		else if (G::bFiring && !G::bReloading)
+			G::bPSilentAngles = true;  // Firing tick (not during reload): pSilent choke
+		else if (G::bFiring && G::bReloading)
+			G::bSilentAngles = true;  // Firing during reload: use silent but don't choke (Amalgam style)
 		else
 			G::bSilentAngles = true;  // Not firing: just hide local view, no choke
 
@@ -1864,17 +1871,55 @@ void CAimbotProjectile::Run(CUserCmd* pCmd, C_TFPlayer* pLocal, C_TFWeaponBase* 
 	if (CFG::Aimbot_Projectile_Sort == 0)
 		G::flAimbotFOV = CFG::Aimbot_Projectile_FOV;
 
+	// Clear cached prediction result only. Used before re-predict and on stale cache.
+	// Add new cache members here — all three clear sites (predict-start, stale-cache, full-reset) depend on this.
+	auto ClearCacheData = [&]()
+	{
+		m_bCachedHasTarget = false;
+		m_CachedTarget = {};              // null out Entity ptr — prevents UAF on dangling pointer
+		m_iCachedTargetIndex = 0;
+		m_vCachedTargetPath.clear();
+	};
+
+	// Full session reset — clears cache + throttle + charge state.
+	// Used on early returns (aimkey release, shifting, weapon change) where the
+	// entire aimbot session is ending, not just refreshing a cache entry.
+	auto InvalidateCache = [&]()
+	{
+		ClearCacheData();
+		m_bPredictionSession = false;
+		m_bWasReadyToFire = false;
+		m_bChargePending = false;         // stale pending flag causes false cancel of manual charges
+		m_vChargeAngles = {};             // stale angles from previous session
+	};
+
 	if (!GetProjectileInfo(pWeapon))
+	{
+		InvalidateCache();
+		m_iCachedWeaponID = 0;
 		return;
+	}
+
+	// Invalidate cache if weapon changed (e.g., rocket → grenade launcher)
+	// Cached angles are computed for a specific projectile speed/arc
+	const int nWeaponID = pWeapon->GetWeaponID();
+	if (m_iCachedWeaponID != 0 && m_iCachedWeaponID != nWeaponID)
+		InvalidateCache();
+	m_iCachedWeaponID = nWeaponID;
 
 	if (Shifting::bShifting && !Shifting::bShiftingWarp)
+	{
+		InvalidateCache(); // shift may last multiple ticks, leaving throttle state stale
 		return;
+	}
 
 	if (!CFG::Aimbot_Always_On && !H::Input->IsDown(CFG::Aimbot_Key))
+	{
+		InvalidateCache();
 		return;
+	}
 
 	// Handle charge weapons (sticky and loose cannon)
-	const int nWeaponID = pWeapon->GetWeaponID();
 	const bool bIsChargeWeapon = (nWeaponID == TF_WEAPON_PIPEBOMBLAUNCHER || nWeaponID == TF_WEAPON_CANNON);
 	
 	// Get charge time - sticky uses m_flChargeBeginTime, cannon uses m_flDetonateTime
@@ -1890,8 +1935,92 @@ void CAimbotProjectile::Run(CUserCmd* pCmd, C_TFPlayer* pLocal, C_TFWeaponBase* 
 	// G::OriginalCmd has the unmodified buttons from user input
 	const bool bUserManualCharge = !m_bChargePending && bIsCharging;
 
+	// Throttle expensive prediction (GetTarget) to ~17Hz.
+	// Force fresh prediction when weapon just became ready to fire (transition tick)
+	// or during active charge — stale angles cause missed shots.
+	// Firing checks, aim, and drawing still run every tick using cached results.
+	const int nPredictInterval = TIME_TO_TICKS(1.0f / 17.0f); // ~59ms = ~17Hz at 66tick
+
+	// Check if weapon can fire now
+	const int nSavedTickBaseEarly = pLocal->m_nTickBase();
+	pLocal->m_nTickBase() = nSavedTickBaseEarly + 1;
+	const bool bCanFireNowEarly = pWeapon->CanPrimaryAttack(pLocal) && pWeapon->HasPrimaryAmmoForShot();
+	pLocal->m_nTickBase() = nSavedTickBaseEarly;
+	const bool bCanInterruptReloadEarly = CanInterruptReload(pWeapon);
+	const bool bCanFireEarly = bCanFireNowEarly || bCanInterruptReloadEarly;
+
+	// Force prediction on the tick the weapon BECOMES ready (transition from can't-fire to can-fire)
+	const bool bJustBecameReady = bCanFireEarly && !m_bWasReadyToFire;
+	m_bWasReadyToFire = bCanFireEarly;
+
+	const bool bForcePredict = (bIsCharging && m_bChargePending) || bJustBecameReady;
+	const bool bShouldPredict = bForcePredict || (I::GlobalVars->tickcount - m_nLastPredictTick >= nPredictInterval) || !m_bPredictionSession;
+
 	ProjTarget_t target = {};
-	const bool bHasTarget = GetTarget(pLocal, pWeapon, pCmd, target) && target.Entity;
+	bool bHasTarget = false;
+
+	if (bShouldPredict)
+	{
+		m_nLastPredictTick = I::GlobalVars->tickcount;
+		ClearCacheData();                  // clear stale prediction before re-running GetTarget
+		m_bPredictionSession = true; // mark session as started even if no target found
+
+		bHasTarget = GetTarget(pLocal, pWeapon, pCmd, target) && target.Entity;
+
+		if (bHasTarget)
+		{
+			// Cache prediction result for intermediate ticks
+			m_bCachedHasTarget = true;
+			m_CachedTarget = target;
+			m_iCachedTargetIndex = target.Entity ? target.Entity->entindex() : 0;
+			m_vCachedTargetPath = m_TargetPath;
+		}
+	}
+	else
+	{
+		// Non-prediction tick: use cached result
+		bool bCacheValid = false;
+
+		if (m_bCachedHasTarget && m_CachedTarget.Entity && H::Entities->SafeIsEntityValid(m_CachedTarget.Entity, m_iCachedTargetIndex))
+		{
+			// Pointer is valid — check if entity is still alive and not dormant.
+			// Must check type via GetClassId before casting — As<T>() is static_cast
+			// and casting a building to C_TFPlayer is UB (unrelated hierarchy).
+			const auto eClassId = m_CachedTarget.Entity->GetClassId();
+
+			if (eClassId == ETFClassIds::CTFPlayer)
+			{
+				const auto pPlayer = static_cast<C_TFPlayer*>(m_CachedTarget.Entity);
+				if (!pPlayer->deadflag() && !pPlayer->IsDormant())
+				{
+					bCacheValid = true;
+					bHasTarget = true;
+					target = m_CachedTarget;
+					m_TargetPath = m_vCachedTargetPath;
+				}
+			}
+			else if (eClassId == ETFClassIds::CObjectSentrygun || eClassId == ETFClassIds::CObjectDispenser || eClassId == ETFClassIds::CObjectTeleporter)
+			{
+				const auto pBuilding = static_cast<C_BaseObject*>(m_CachedTarget.Entity);
+				if (pBuilding->m_iHealth() > 0 && !pBuilding->m_bCarried() && !pBuilding->m_bPlacing() && !pBuilding->IsDormant())
+				{
+					bCacheValid = true;
+					bHasTarget = true;
+					target = m_CachedTarget;
+					m_TargetPath = m_vCachedTargetPath;
+				}
+			}
+			// Unknown entity type — don't use cache, force re-predict
+		}
+
+		if (!bCacheValid)
+		{
+			// Cache is stale/invalid — clear everything and force predict next tick
+			ClearCacheData();
+			m_nLastPredictTick = 0;
+			bHasTarget = false;
+		}
+	}
 
 	// Only cancel charge if:
 	// 1. AutoShoot is on
@@ -1914,8 +2043,14 @@ void CAimbotProjectile::Run(CUserCmd* pCmd, C_TFPlayer* pLocal, C_TFWeaponBase* 
 		G::nTargetIndexEarly = target.Entity->entindex();
 		G::nTargetIndex = target.Entity->entindex();
 
+		// bCanFireNowEarly and bCanInterruptReloadEarly already computed above for throttle decision
+		const bool bOldCanPrimaryAttack = G::bCanPrimaryAttack;
+		G::bCanPrimaryAttack = bCanFireNowEarly || bCanInterruptReloadEarly;
+
 		if (ShouldFire(pCmd, pLocal, pWeapon))
+		{
 			HandleFire(pCmd, pWeapon, pLocal, target);
+		}
 
 		const bool bIsFiring = IsFiring(pCmd, pLocal, pWeapon);
 		G::bFiring = bIsFiring;
@@ -1939,7 +2074,6 @@ void CAimbotProjectile::Run(CUserCmd* pCmd, C_TFPlayer* pLocal, C_TFWeaponBase* 
 			if (bIsFiring && bIsChargeWeapon)
 				m_vChargeAngles = {};
 
-
 			if (bIsFiring && !m_TargetPath.empty())
 			{
 				I::DebugOverlay->ClearAllOverlays();
@@ -1948,5 +2082,7 @@ void CAimbotProjectile::Run(CUserCmd* pCmd, C_TFPlayer* pLocal, C_TFWeaponBase* 
 				m_TargetPath.clear();
 			}
 		}
+
+		G::bCanPrimaryAttack = bOldCanPrimaryAttack;
 	}
 }

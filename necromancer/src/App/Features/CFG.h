@@ -69,7 +69,7 @@ namespace CFG
 	CFGVAR(Aimbot_Projectile_Aim_Position, 3); //0 Feet 1 Body 2 Head 3 Auto
 	CFGVAR(Aimbot_Projectile_Aim_Prediction_Method, 0); //0 Full Acceleration 1 Current Velocity
 	CFGVAR(Aimbot_Projectile_FOV, 45.0f);
-	CFGVAR(Aimbot_Projectile_Max_Simulation_Time, 2.5f); // Increased from 1.5 for better prediction
+	CFGVAR(Aimbot_Projectile_Max_Simulation_Time, 7.0f); // Increased from 4.0 for better prediction
 	CFGVAR(Aimbot_Projectile_Max_Processing_Targets, 1);
 	
 	// Strafe prediction tuning (Amalgam-style)

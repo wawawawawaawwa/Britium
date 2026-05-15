@@ -707,7 +707,7 @@ void CAimbotWrangler::Aim(CUserCmd* pCmd, C_TFPlayer* pLocal, const Vec3& vAngle
 			break;
 		}
 		
-		// Silent — only choke packet (pSilent) when actually firing.
+		// Silent
 		case 1:
 		{
 			H::AimUtils->FixMovement(pCmd, vAngleTo);
@@ -716,7 +716,7 @@ void CAimbotWrangler::Aim(CUserCmd* pCmd, C_TFPlayer* pLocal, const Vec3& vAngle
 			if (Shifting::bShifting && Shifting::bShiftingWarp)
 				G::bSilentAngles = true;  // Warp: choke handled by warp system
 			else if (bIsFiring)
-				G::bSilentAngles = true;  // Firing tick: silent aim, restore view next tick
+				G::bSilentAngles = true;  // Wrangler can hold fire continuously, don't packet choke it
 			else
 				G::bSilentAngles = true;  // Not firing: just hide local view, no choke
 			break;

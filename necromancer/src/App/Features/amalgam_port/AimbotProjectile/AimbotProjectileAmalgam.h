@@ -94,6 +94,19 @@ private:
     std::vector<Vec3> m_vProjectilePath = {};
     std::vector<DrawBox_t> m_vBoxes = {};
 
+    // Prediction throttle — full prediction runs at ~17Hz,
+    // cached result used on intermediate ticks for cheap aim/firing/draw
+    int m_nLastPredictTick = 0;
+    bool m_bPredictionSession = false; // true after first prediction attempt (even if no target)
+    bool m_bWasReadyToFire = false;   // tracks can-fire transition for force-predict
+    int m_iCachedResult = 0;  // 0=none, 1=direct hit, 2=smooth/assistive
+    int m_iCachedTargetIndex = 0;
+    C_BaseEntity* m_pCachedEntity = nullptr;
+    Vec3 m_vCachedAngleTo = {};
+    Vec3 m_vCachedTargetPos = {};
+    std::vector<Vec3> m_vCachedProjectilePath = {};
+    std::vector<Vec3> m_vCachedPlayerPath = {};
+
 public:
     // Main entry point - only handles rocket launchers
     void Run(C_TFPlayer* pLocal, C_TFWeaponBase* pWeapon, CUserCmd* pCmd);

@@ -100,7 +100,7 @@ MAKE_HOOK(CHLClient_Createmove, Memory::GetVFunc(I::ClientModeShared, 21), bool,
 
 	// Reset per-frame state
 	G::bSilentAngles = false;
-	G::bSilentAngles = false;
+	G::bPSilentAngles = false;
 	G::bFiring = false;
 	G::bAutoScopeWaitActive = false;
 	G::Attacking = 0;
@@ -286,15 +286,6 @@ MAKE_HOOK(CHLClient_Createmove, Memory::GetVFunc(I::ClientModeShared, 21), bool,
 	{
 		G::bCanHeadshot = pWeapon->CanHeadShot(pLocal);
 
-		// Amalgam's CheckReload trick
-		if (pWeapon->GetMaxClip1() != -1 && !pWeapon->m_bReloadsSingly())
-		{
-			float flOldCurtime = I::GlobalVars->curtime;
-			I::GlobalVars->curtime = TICKS_TO_TIME(pLocal->m_nTickBase());
-			pWeapon->CheckReload();
-			I::GlobalVars->curtime = flOldCurtime;
-		}
-
 		G::bCanPrimaryAttack = pWeapon->CanPrimaryAttack(pLocal);
 		G::bCanSecondaryAttack = pWeapon->CanSecondaryAttack(pLocal);
 
@@ -319,7 +310,7 @@ MAKE_HOOK(CHLClient_Createmove, Memory::GetVFunc(I::ClientModeShared, 21), bool,
 				G::bCanSecondaryAttack = false;
 			}
 
-			if (bReload && bAmmo && !G::bCanPrimaryAttack)
+			if (bReload && bAmmo)
 				G::bReloading = true;
 		}
 
@@ -563,19 +554,6 @@ MAKE_HOOK(CHLClient_Createmove, Memory::GetVFunc(I::ClientModeShared, 21), bool,
 	if (AntiAimCheck(pLocal, pWeapon, pCmd))
 		bSendPacket = false;
 
-	// Prevent overchoking
-	if (I::ClientState->chokedcommands > 21)
-		bSendPacket = true;
-
-	// pSilent removed — was choking packets and causing tick issues.
-	// All aimbots now use bSilentAngles (view restore only, no choke).
-
-	// ============================================
-	// RapidFire/Ticks management - AFTER pSilent handling (like reference)
-	// ============================================
-	F::RapidFire->RunFastSticky(pCmd, &bSendPacket);  // Fast sticky shooting key (runs first)
-	F::RapidFire->Run(pCmd, &bSendPacket);
-
 	// ============================================
 	// AMALGAM ORDER: AntiAim.Run
 	// ============================================
@@ -600,6 +578,34 @@ AfterPrediction:
 		G::bSilentAngles = true;  // Force silent angle restoration
 	}
 
+	// pSilent
+	{
+		static bool bWasSet = false;
+
+		if (G::bPSilentAngles)
+		{
+			bSendPacket = false;
+			bWasSet = true;
+		}
+		else
+		{
+			if (bWasSet)
+			{
+				bSendPacket = true;
+				pCmd->viewangles = vOldAngles;
+				pCmd->sidemove = flOldSide;
+				pCmd->forwardmove = flOldForward;
+				bWasSet = false;
+			}
+		}
+	}
+
+	if (I::ClientState->chokedcommands > 22)
+		bSendPacket = true;
+
+	F::RapidFire->RunFastSticky(pCmd, &bSendPacket);
+	F::RapidFire->Run(pCmd, &bSendPacket);
+
 	// Store bones when packet is sent (for fakelag visualization)
 	if (bSendPacket)
 		F::FakeAngle->StoreSentBones(pLocal);
@@ -614,7 +620,7 @@ AfterPrediction:
 	G::vUserCmdAngles = pCmd->viewangles;
 
 	// Silent aim handling
-	if (G::bSilentAngles)
+	if (G::bSilentAngles || G::bPSilentAngles)
 	{
 		// Use TRUE original angles for view restoration
 		// This ensures anti-cheat lerping doesn't affect what the player sees

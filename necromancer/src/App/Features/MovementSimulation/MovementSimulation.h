@@ -23,6 +23,8 @@ struct MoveRecord
 	Vec3 m_vVelocity = {};
 	Vec3 m_vOrigin = {};
 	bool m_bHitWall = false;
+	bool m_bEvasiveFriction = false;   // RijiN: rapidly changing direction on ground — apply extra friction
+	bool m_bEvasiveZeroVel = false;    // RijiN: extremely erratic movement — zero velocity
 };
 
 struct MoveStorage
@@ -32,13 +34,19 @@ struct MoveStorage
 	byte* m_pData = nullptr;
 
 	float m_flAverageYaw = 0.f;
+	bool m_bEvasiveFriction = false;   // RijiN: apply extra friction for erratic ground movement
 	bool m_bBunnyHop = false;
+
+	float m_flOldModelScale = 0.f;    // Backed up model scale for explicit restore
+	Vec3 m_vOldOrigin = {};           // Backed up origin for explicit restore
+	bool m_bHasBackup = false;        // Whether we have backup values to restore
 	float m_flBhopCadence = 0.f;        // Predicted time between jumps (seconds)
 	int m_iBhopSimTicksInAir = 0;       // Ticks airborne in the sim (for jump timing)
 
 	float m_flSimTime = 0.f;
 	float m_flPredictedDelta = 0.f;
 	float m_flPredictedSimTime = 0.f;
+	float m_flTimeToTarget = 0.f;       // Remaining sim time to target (for ground yaw decay)
 	bool m_bDirectMove = false;
 	bool m_bPredictNetworked = false;
 

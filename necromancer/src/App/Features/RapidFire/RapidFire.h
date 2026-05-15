@@ -24,6 +24,8 @@ class CRapidFire
 	bool ShouldStartFastSticky(C_TFPlayer* pLocal, C_TFWeaponBase* pWeapon);
 	int GetFastStickyMaxRecharge();
 	bool IsFastStickyUsable();
+	bool IsScottishResistance(C_TFWeaponBase* pWeapon);
+	int GetStickyPreferredTicks(C_TFWeaponBase* pWeapon);
 
 public:
 	void Run(CUserCmd* pCmd, bool* pSendPacket);

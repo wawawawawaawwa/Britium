@@ -757,7 +757,7 @@ void CAimbotHitscan::Aim(CUserCmd* pCmd, C_TFPlayer* pLocal, const Vec3& vAngles
 				if (Shifting::bShifting && Shifting::bShiftingWarp)
 					G::bSilentAngles = true;  // Warp: choke handled by warp system
 				else if (G::Attacking == 1 || G::bFiring)
-					G::bSilentAngles = true;  // Fire tick: silent aim, restore view next tick
+					G::bSilentAngles = true;  // Hitscan uses normal silent, not packet choke
 				else
 					G::bSilentAngles = true;  // Cooldown: just hide local view, no choke
 			}
@@ -1188,6 +1188,20 @@ bool CAimbotHitscan::IsFiring(const CUserCmd* pCmd, C_TFWeaponBase* pWeapon)
 	return false;
 }
 
+static bool CanInterruptReload(C_TFWeaponBase* pWeapon)
+{
+	if (!pWeapon || !pWeapon->HasPrimaryAmmoForShot() || pWeapon->m_iClip1() <= 0 || !pWeapon->IsInReload())
+		return false;
+
+	if (pWeapon->m_bReloadsSingly())
+		return true;
+
+	const int nWeaponID = pWeapon->GetWeaponID();
+	return nWeaponID == TF_WEAPON_SMG || nWeaponID == TF_WEAPON_CHARGED_SMG
+		|| nWeaponID == TF_WEAPON_PISTOL || nWeaponID == TF_WEAPON_PISTOL_SCOUT
+		|| nWeaponID == TF_WEAPON_MINIGUN;
+}
+
 void CAimbotHitscan::Run(CUserCmd* pCmd, C_TFPlayer* pLocal, C_TFWeaponBase* pWeapon)
 {
 	if (!CFG::Aimbot_Hitscan_Active)
@@ -1264,7 +1278,19 @@ void CAimbotHitscan::Run(CUserCmd* pCmd, C_TFPlayer* pLocal, C_TFWeaponBase* pWe
 				}
 			}
 
-			bool bShouldFire = ShouldFire(pCmd, pLocal, pWeapon, target);
+			const int nSavedTickBase = pLocal->m_nTickBase();
+			pLocal->m_nTickBase() = nSavedTickBase + 1;
+			const bool bCanFireNow = pWeapon->CanPrimaryAttack(pLocal) && pWeapon->HasPrimaryAmmoForShot();
+			pLocal->m_nTickBase() = nSavedTickBase;
+			const bool bCanInterruptReload = CanInterruptReload(pWeapon);
+			const bool bOldCanPrimaryAttack = G::bCanPrimaryAttack;
+			G::bCanPrimaryAttack = bCanFireNow || bCanInterruptReload;
+			
+			bool bShouldFire = false;
+			if (bCanFireNow || bCanInterruptReload)
+			{
+				bShouldFire = ShouldFire(pCmd, pLocal, pWeapon, target);
+			}
 
 			if (bShouldFire)
 			{
@@ -1278,12 +1304,10 @@ void CAimbotHitscan::Run(CUserCmd* pCmd, C_TFPlayer* pLocal, C_TFWeaponBase* pWe
 					pCmd->buttons &= ~IN_ATTACK;
 			}
 
-			// Update G::Attacking BEFORE calling Aim (like Amalgam does)
-			// This ensures Aim() can check G::Attacking == 1 to know if we're firing
-			G::Attacking = SDK::IsAttacking(pLocal, pWeapon, pCmd, true);
-			
-			const bool bIsFiring = G::Attacking == 1;
+			const bool bIsFiring = IsFiring(pCmd, pWeapon);
+			G::Attacking = bIsFiring ? 1 : 0;
 			G::bFiring = bIsFiring;
+			G::bCanPrimaryAttack = bOldCanPrimaryAttack;
 
 			// Are we ready to aim?
 			if (ShouldAim(pCmd, pLocal, pWeapon) || bIsFiring)

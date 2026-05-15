@@ -314,6 +314,25 @@ bool CRapidFire::IsStickyWeapon(C_TFWeaponBase* pWeapon)
 	return nWeaponID == TF_WEAPON_PIPEBOMBLAUNCHER || nWeaponID == TF_WEAPON_CANNON;
 }
 
+bool CRapidFire::IsScottishResistance(C_TFWeaponBase* pWeapon)
+{
+	if (!pWeapon)
+		return false;
+
+	return pWeapon->m_iItemDefinitionIndex() == Demoman_s_TheScottishResistance;
+}
+
+int CRapidFire::GetStickyPreferredTicks(C_TFWeaponBase* pWeapon)
+{
+	// Scottish Resistance: 15 preferred ticks (lower fire rate)
+	// Normal sticky / Iron Bomber: 20 preferred ticks
+	const int nPreferred = IsScottishResistance(pWeapon) ? 15 : 20;
+
+	// Can't use more ticks than the recharge limit allows
+	const int nMaxRecharge = GetFastStickyMaxRecharge();
+	return std::min(nPreferred, nMaxRecharge);
+}
+
 bool CRapidFire::IsProjectileWeapon(C_TFWeaponBase* pWeapon)
 {
 	if (!pWeapon)
@@ -361,7 +380,8 @@ int CRapidFire::GetTicks(C_TFWeaponBase* pWeapon)
 			return 0;
 		if (!pWeapon->HasPrimaryAmmoForShot())
 			return 0;
-		return std::min(nNeededTicks, Shifting::nAvailableTicks);
+		const int nStickyTicks = GetStickyPreferredTicks(pWeapon);
+		return std::min(nStickyTicks, Shifting::nAvailableTicks);
 	}
 
 	if (IsProjectileWeapon(pWeapon))
@@ -391,8 +411,11 @@ int CRapidFire::GetFastStickyMaxRecharge()
 	if (CFG::Misc_AntiCheat_Enabled && !CFG::Misc_AntiCheat_IgnoreTickLimit)
 		return 8;
 
-	const int nUserLimit = std::clamp(CFG::Exploits_Shifting_Recharge_Limit, 2, 24);
-	return nUserLimit;
+	// Use the same limit CL_Move uses for recharging — GetOptimalRechargeLimit()
+	// accounts for auto settings (ping-based adjustment) and anti-cheat caps.
+	// If we used the raw CFG value here, we'd think we can use more ticks than
+	// CL_Move will actually recharge to, causing the sticky to wait forever.
+	return F::Ticks->GetOptimalRechargeLimit();
 }
 
 bool CRapidFire::IsFastStickyUsable()
@@ -400,7 +423,9 @@ bool CRapidFire::IsFastStickyUsable()
 	if (CFG::Misc_AntiCheat_Enabled && !CFG::Misc_AntiCheat_IgnoreTickLimit)
 		return false;
 
-	if (CFG::Exploits_Shifting_Recharge_Limit <= 12)
+	// Need at least 8 recharge limit for fast sticky to be useful
+	// (preferred ticks are clamped by recharge limit anyway)
+	if (CFG::Exploits_Shifting_Recharge_Limit < 8)
 		return false;
 
 	return true;
@@ -426,6 +451,7 @@ void CRapidFire::RunFastSticky(CUserCmd* pCmd, bool* pSendPacket)
 	if (!pLocal || pLocal->deadflag())
 	{
 		m_bStickyCharging = false;
+		Shifting::nStickyRechargeTarget = 0;
 		return;
 	}
 
@@ -433,12 +459,14 @@ void CRapidFire::RunFastSticky(CUserCmd* pCmd, bool* pSendPacket)
 	if (!pWeapon || !IsStickyWeapon(pWeapon))
 	{
 		m_bStickyCharging = false;
+		Shifting::nStickyRechargeTarget = 0;
 		return;
 	}
 
 	if (I::MatSystemSurface->IsCursorVisible() || I::EngineVGui->IsGameUIVisible())
 	{
 		m_bStickyCharging = false;
+		Shifting::nStickyRechargeTarget = 0;
 		return;
 	}
 
@@ -450,12 +478,14 @@ void CRapidFire::RunFastSticky(CUserCmd* pCmd, bool* pSendPacket)
 	if (!bKeyDown)
 	{
 		m_bStickyCharging = false;
+		Shifting::nStickyRechargeTarget = 0;  // Clear target so normal recharge behavior resumes
 		return;
 	}
 
 	if (!IsFastStickyUsable())
 	{
 		m_bStickyCharging = false;
+		Shifting::nStickyRechargeTarget = 0;
 		return;
 	}
 
@@ -463,13 +493,18 @@ void CRapidFire::RunFastSticky(CUserCmd* pCmd, bool* pSendPacket)
 
 	const bool bCanFire = G::bCanSecondaryAttack && pWeapon->HasPrimaryAmmoForShot();
 	const int nMaxRecharge = GetFastStickyMaxRecharge();
-	const int nTargetTicks = 21;
+	const int nTargetTicks = GetStickyPreferredTicks(pWeapon);  // 20 normal, 15 scottish, clamped by recharge limit
+	const int nRechargeTarget = std::min(nTargetTicks, nMaxRecharge);
+
+	// Tell CL_Move to stop recharging once we have enough ticks for the next shot
+	Shifting::nStickyRechargeTarget = nRechargeTarget;
 
 	if (!bCanFire)
 	{
-		const int nRechargeTarget = std::min(nTargetTicks, nMaxRecharge);
-		if (Shifting::nAvailableTicks < nRechargeTarget)
-			Shifting::bRecharging = true;
+		if (Shifting::nAvailableTicks >= nRechargeTarget)
+			Shifting::bRecharging = false;  // Have enough for next shot, stop recharging
+		else
+			Shifting::bRecharging = true;   // Need more ticks
 		return;
 	}
 
@@ -482,8 +517,11 @@ void CRapidFire::RunFastSticky(CUserCmd* pCmd, bool* pSendPacket)
 
 	if (nTicksToUse >= 1)
 	{
-		if (!*pSendPacket)
-			return;
+		// NOTE: Don't block on !*pSendPacket here. After switching to cl_moverebuild,
+		// the packet timing changed and this check was preventing the second sticky shot
+		// from firing. The CL_Move code handles the shift regardless of send packet state.
+		// Only skip if we're already choking for pSilent — but for sticky DT we force
+		// the shift through anyway since the shift itself handles packet flow.
 
 		Shifting::bRecharging = false;
 		pCmd->buttons |= IN_ATTACK;
@@ -511,7 +549,9 @@ void CRapidFire::RunFastSticky(CUserCmd* pCmd, bool* pSendPacket)
 	else
 	{
 		const int nRechargeTarget = std::min(nTargetTicks, nMaxRecharge);
-		if (Shifting::nAvailableTicks < nRechargeTarget)
-			Shifting::bRecharging = true;
+		if (Shifting::nAvailableTicks >= nRechargeTarget)
+			Shifting::bRecharging = false;  // Have enough for next shot
+		else
+			Shifting::bRecharging = true;   // Need more ticks
 	}
 }

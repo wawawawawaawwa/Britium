@@ -330,8 +330,11 @@ void CMiscVisuals::ViewModelSway()
 		if (const auto pWeapon = H::Entities->GetWeapon())
 		{
 			const float flBaseValue = pWeapon->GetWeaponID() == TF_WEAPON_COMPOUND_BOW ? 0.02f : 0.05f;
-
-			cl_wpn_sway_interp->SetValue(flBaseValue * CFG::Visuals_ViewModel_Sway_Scale);
+			const float flDesiredValue = flBaseValue * CFG::Visuals_ViewModel_Sway_Scale;
+			
+			// Only update if value changed
+			if (cl_wpn_sway_interp->GetFloat() != flDesiredValue)
+				cl_wpn_sway_interp->SetValue(flDesiredValue);
 		}
 	}
 	else
@@ -342,19 +345,32 @@ void CMiscVisuals::ViewModelSway()
 		}
 	}
 	
-	// Apply viewmodel convars
+	// Apply viewmodel convars - cache previous values to avoid redundant SetValue calls
 	static ConVar* tf_use_min_viewmodels = I::CVar->FindVar("tf_use_min_viewmodels");
 	static ConVar* cl_flipviewmodels = I::CVar->FindVar("cl_flipviewmodels");
 	static ConVar* cl_first_person_uses_world_model = I::CVar->FindVar("cl_first_person_uses_world_model");
 	
-	if (tf_use_min_viewmodels)
+	static bool bLastMinimal = false;
+	static bool bLastFlip = false;
+	static bool bLastWorldModel = false;
+	
+	if (tf_use_min_viewmodels && CFG::Visuals_ViewModel_Minimal != bLastMinimal)
+	{
 		tf_use_min_viewmodels->SetValue(CFG::Visuals_ViewModel_Minimal ? 1 : 0);
+		bLastMinimal = CFG::Visuals_ViewModel_Minimal;
+	}
 	
-	if (cl_flipviewmodels)
+	if (cl_flipviewmodels && CFG::Visuals_Viewmodel_Flip != bLastFlip)
+	{
 		cl_flipviewmodels->SetValue(CFG::Visuals_Viewmodel_Flip ? 1 : 0);
+		bLastFlip = CFG::Visuals_Viewmodel_Flip;
+	}
 	
-	if (cl_first_person_uses_world_model)
+	if (cl_first_person_uses_world_model && CFG::Visuals_ViewModel_WorldModel != bLastWorldModel)
+	{
 		cl_first_person_uses_world_model->SetValue(CFG::Visuals_ViewModel_WorldModel ? 1 : 0);
+		bLastWorldModel = CFG::Visuals_ViewModel_WorldModel;
+	}
 }
 
 void CMiscVisuals::DetailProps()
@@ -363,9 +379,14 @@ void CMiscVisuals::DetailProps()
 		return;
 
 	static ConVar* r_drawdetailprops = I::CVar->FindVar("r_drawdetailprops");
+	static bool bAlreadyDisabled = false;
 
-	if (r_drawdetailprops && r_drawdetailprops->GetInt())
+	// Only set once - no need to check/set every frame
+	if (r_drawdetailprops && !bAlreadyDisabled)
+	{
 		r_drawdetailprops->SetValue(0);
+		bAlreadyDisabled = true;
+	}
 }
 
 void CMiscVisuals::ShiftBar()

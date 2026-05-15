@@ -3008,7 +3008,7 @@ void CMenu::MainWindow()
 					});
 
 				SliderFloat("FOV", CFG::Aimbot_Projectile_FOV, 1.0f, 180.0f, 1.0f, "%.0f");
-				SliderFloat("Max Simulation Time", CFG::Aimbot_Projectile_Max_Simulation_Time, 1.0f, 5.0f, 0.5f, "%.1fs");
+				SliderFloat("Max Simulation Time", CFG::Aimbot_Projectile_Max_Simulation_Time, 0.1f, 7.0f, 0.25f, "%.1fs");
 				SliderInt("Max Targets", CFG::Aimbot_Projectile_Max_Processing_Targets, 1, 6, 1);
 				SliderInt("Splash Points", CFG::Aimbot_Amalgam_Projectile_SplashPoints, 50, 400, 5);
 			}
