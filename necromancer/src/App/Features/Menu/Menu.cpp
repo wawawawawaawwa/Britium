@@ -4250,7 +4250,7 @@ void CMenu::MainWindow()
 			// Keys
 			InputKey("Recharge Key", CFG::Exploits_Shifting_Recharge_Key);
 			InputKey("Rapid Fire Key", CFG::Exploits_RapidFire_Key);
-			InputKey("Fast Sticky Key", CFG::Exploits_FastSticky_Key);
+			{ bool bDisabled = false; CheckBox("Fast Sticky Disabled", bDisabled); }
 			InputKey("Warp Key", CFG::Exploits_Warp_Key);
 
 			// Tick settings

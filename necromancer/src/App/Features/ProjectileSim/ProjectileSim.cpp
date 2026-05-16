@@ -4,6 +4,12 @@
 static IPhysicsEnvironment* env{};
 static IPhysicsObject* obj{};
 
+// Cached env state to avoid redundant vphysics calls that log to dev console
+static Vector s_vLastGravity = { 0, 0, 0 };
+static float s_flLastAirDensity = -1.0f;
+static float s_flLastMaxVel = -1.0f;
+static float s_flLastMaxAngVel = -1.0f;
+
 bool CProjectileSim::GetInfo(C_TFPlayer* player, C_TFWeaponBase* weapon, const Vec3& angles, ProjSimInfo& out)
 {
 	if (!player || !weapon)
@@ -298,9 +304,26 @@ bool CProjectileSim::Init(const ProjSimInfo& info, bool no_vec_up)
 		params.maxVelocity = max_vel;
 		params.maxAngularVelocity = max_ang_vel;
 
-		env->SetPerformanceSettings(&params);
-		env->SetAirDensity(2.0f);
-		env->SetGravity({ 0.0f, 0.0f, -(800.0f * info.m_gravity_mod) });
+		if (s_flLastMaxVel != max_vel || s_flLastMaxAngVel != max_ang_vel)
+		{
+			env->SetPerformanceSettings(&params);
+			s_flLastMaxVel = max_vel;
+			s_flLastMaxAngVel = max_ang_vel;
+		}
+
+		constexpr float flAirDensity = 2.0f;
+		if (s_flLastAirDensity != flAirDensity)
+		{
+			env->SetAirDensity(flAirDensity);
+			s_flLastAirDensity = flAirDensity;
+		}
+
+		const Vector vGravity = { 0.0f, 0.0f, -(800.0f * info.m_gravity_mod) };
+		if (s_vLastGravity != vGravity)
+		{
+			env->SetGravity(vGravity);
+			s_vLastGravity = vGravity;
+		}
 
 		env->ResetSimulationClock(); //not needed?
 	}

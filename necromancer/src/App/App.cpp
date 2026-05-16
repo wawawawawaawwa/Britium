@@ -160,13 +160,6 @@ void CApp::Start()
 		mat_queue_mode->SetValue(2);
 	}
 
-	// Suppress DataTable warnings from anti-aim exploit angles
-	// These warnings spam the console when using out-of-range pitch values
-	if (const auto developer = I::CVar->FindVar("developer"))
-	{
-		developer->SetValue(0);
-	}
-
 	const auto month = []
 	{
 		const std::time_t t = std::time(nullptr);
