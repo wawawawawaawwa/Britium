@@ -146,17 +146,21 @@ void CMiscVisuals::AimbotFOVCircle()
 		return;
 
 	const auto pLocal = H::Entities->GetLocal();
-	if (!pLocal)
+	if (!pLocal || pLocal->deadflag())
 		return;
 
 	const auto flAimFOV = G::flAimbotFOV;
 	if (!flAimFOV)
 		return;
 
+	const int nPlayerFOV = pLocal->m_iFOV();
+	if (nPlayerFOV <= 0)
+		return;
+
 	// Cache screen dimensions
 	const int screenW = H::Draw->GetScreenW();
 	const int screenH = H::Draw->GetScreenH();
-	const float flRadius = tanf(DEG2RAD(flAimFOV) / 2.0f) / tanf(DEG2RAD(static_cast<float>(pLocal->m_iFOV())) / 2.0f) * screenW;
+	const float flRadius = tanf(DEG2RAD(flAimFOV) / 2.0f) / tanf(DEG2RAD(static_cast<float>(nPlayerFOV)) / 2.0f) * screenW;
 	const int centerX = screenW / 2;
 	const int centerY = screenH / 2;
 	constexpr int segments = 70;
@@ -212,11 +216,15 @@ void CMiscVisuals::AimbotFOVCircleBloom()
 		return;
 
 	const auto pLocal = H::Entities->GetLocal();
-	if (!pLocal)
+	if (!pLocal || pLocal->deadflag())
 		return;
 
 	const auto flAimFOV = G::flAimbotFOV;
 	if (!flAimFOV)
+		return;
+
+	const int nPlayerFOV = pLocal->m_iFOV();
+	if (nPlayerFOV <= 0)
 		return;
 
 	auto pRenderContext = I::MaterialSystem->GetRenderContext();
@@ -226,7 +234,7 @@ void CMiscVisuals::AimbotFOVCircleBloom()
 	if (m_pBloomAmount)
 		m_pBloomAmount->SetIntValue(CFG::Visuals_Aimbot_FOV_Circle_Bloom_Amount);
 
-	const float flRadius = tanf(DEG2RAD(flAimFOV) / 2.0f) / tanf(DEG2RAD(static_cast<float>(pLocal->m_iFOV())) / 2.0f) * w;
+	const float flRadius = tanf(DEG2RAD(flAimFOV) / 2.0f) / tanf(DEG2RAD(static_cast<float>(nPlayerFOV)) / 2.0f) * w;
 	const float centerX = w / 2.0f;
 	const float centerY = h / 2.0f;
 	const int segments = 70;

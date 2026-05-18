@@ -338,7 +338,7 @@ bool CAimbotHitscan::GetTarget(C_TFPlayer* pLocal, C_TFWeaponBase* pWeapon, cons
 						const float flCurrentAge = I::GlobalVars->curtime - pPlayer->m_flSimulationTime();
 						if (F::LagRecords->IsRecordAgeValidForServer(flCurrentAge))
 						{
-							// Force fresh bone setup — the cache may be stale after LagRecords
+							// Force fresh bone setup once per player — the cache may be stale after LagRecords
 							// invalidated it during record collection. Without this, GetHitboxPos
 							// returns positions from the previous frame's bone matrix, which can
 							// be 50+ HU off from the player's actual position.
@@ -461,9 +461,11 @@ bool CAimbotHitscan::GetTarget(C_TFPlayer* pLocal, C_TFWeaponBase* pWeapon, cons
 				}
 
 				// Fallback: no lag records exist at all, target real model (only without fake latency)
+				// Bone cache already invalidated above if we entered the HasRecords path
 				if (candidates.empty() && F::LagRecords->GetFakeLatency() <= 0.0f)
 				{
-					pPlayer->InvalidateBoneCache();
+					if (!F::LagRecords->HasRecords(pPlayer))
+						pPlayer->InvalidateBoneCache();
 					Vec3 vPos = pPlayer->GetHitboxPos(nAimHitbox);
 					Vec3 vAngleTo = Math::CalcAngle(vLocalPos, vPos);
 					const float flFOVTo = CFG::Aimbot_Hitscan_Sort == 0 ? Math::CalcFov(vLocalAngles, vAngleTo) : 0.0f;
@@ -516,7 +518,15 @@ bool CAimbotHitscan::GetTarget(C_TFPlayer* pLocal, C_TFWeaponBase* pWeapon, cons
 				if (F::LagRecords->GetFakeLatency() > 0.0f)
 					continue;
 
-				pPlayer->InvalidateBoneCache();
+				// Only invalidate if we haven't already done so for this player this frame
+				static int nLastInvalidateFrame = -1;
+				static int nLastInvalidateEnt = -1;
+				if (nLastInvalidateFrame != I::GlobalVars->framecount || nLastInvalidateEnt != pPlayer->entindex())
+				{
+					pPlayer->InvalidateBoneCache();
+					nLastInvalidateFrame = I::GlobalVars->framecount;
+					nLastInvalidateEnt = pPlayer->entindex();
+				}
 				Vec3 vPos = pPlayer->GetHitboxPos(nAimHitbox);
 				Vec3 vAngleTo = Math::CalcAngle(vLocalPos, vPos);
 				const float flFOVTo = CFG::Aimbot_Hitscan_Sort == 0 ? Math::CalcFov(vLocalAngles, vAngleTo) : 0.0f;
