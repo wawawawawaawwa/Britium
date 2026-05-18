@@ -8,9 +8,11 @@
 struct CrashContext_t
 {
 	const char* m_pszLastFeature = "none";       // Which feature was last running
+	const char* m_pszLastSubFeature = "none";    // Sub-operation within the feature (e.g. "SetupBones", "ValidateEntity")
 	const char* m_pszLastHook = "none";          // Which hook was active
 	int m_nTargetIndex = -1;                     // Aimbot target
 	int m_nCommandNumber = 0;                    // Current cmd number
+	int m_nEntityIndex = -1;                     // Entity index being processed
 	bool m_bInGame = false;                      // Engine says we're in game
 	bool m_bLevelTransition = false;             // Level transition in progress
 	char m_szMapName[64] = {};                   // Current map name

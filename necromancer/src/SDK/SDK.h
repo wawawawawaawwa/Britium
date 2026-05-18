@@ -359,7 +359,7 @@ namespace G
 		bool m_bActive = false;
 	};
 
-	static constexpr int MAX_VELFIX_SLOTS = 65;
+	static constexpr int MAX_VELFIX_SLOTS = ABSOLUTE_PLAYER_LIMIT + 1;
 	inline VelFixRecord_t mapVelFixRecords[MAX_VELFIX_SLOTS] = {};
 
 	inline bool bFiring = false;

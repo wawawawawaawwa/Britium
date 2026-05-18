@@ -29,8 +29,9 @@ struct Sequence_t
 	float flTime = 0.f;
 };
 
-// Max entity index for players (TF2 supports up to 33 players, indices 1-32)
-constexpr int MAX_LAG_RECORDS_SLOTS = 65;
+// Player-indexed storage must cover EngineClient->GetMaxClients(), which can be
+// higher than vanilla MAX_PLAYERS on community/high-player-count servers.
+constexpr int MAX_LAG_RECORDS_SLOTS = ABSOLUTE_PLAYER_LIMIT + 1;
 
 class CLagRecords
 {
@@ -103,7 +104,7 @@ public:
 	float GetOutgoingLatency() const;
 
 	void UpdateDatagram();
-	void AddRecord(C_TFPlayer* pPlayer);
+	void AddRecord(C_TFPlayer* pPlayer, int nKnownIndex = 0);
 	const LagRecord_t* GetRecord(C_TFPlayer* pPlayer, int nRecord, bool bSafe = true);
 	bool HasRecords(C_TFPlayer* pPlayer, int* pTotalRecords = nullptr);
 	void UpdateRecords();

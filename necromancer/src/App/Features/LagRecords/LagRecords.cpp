@@ -153,22 +153,105 @@ void CLagRecords::UpdateDatagram()
 		m_dSequences.pop_back();
 }
 
-void CLagRecords::AddRecord(C_TFPlayer* pPlayer)
+// SEH-safe bone setup helpers — entity internal state can be corrupted on
+// high-player-count servers (40+ players), causing null pointer dereferences
+// (RCX=0x0) inside InvalidateBoneCache/SetupBones. These helpers catch the
+// access violation and skip the record instead of crashing the game.
+// Must be plain functions (no C++ objects with destructors) for __try/__except.
+
+static bool SafeInvalidateAndSetupBones(C_TFPlayer* pPlayer, bool bInvalidate, matrix3x4_t* pBoneMatrix, int nMaxBones, int nBoneMask, float flCurTime)
+{
+	__try {
+		if (bInvalidate)
+			pPlayer->InvalidateBoneCache();
+		return pPlayer->SetupBones(pBoneMatrix, nMaxBones, nBoneMask, flCurTime) != 0;
+	}
+	__except (EXCEPTION_EXECUTE_HANDLER) {
+		return false;
+	}
+}
+
+static void SafeSetupAttachmentBones(C_BaseEntity* pAttach, float flCurTime)
+{
+	__try {
+		pAttach->InvalidateBoneCache();
+		pAttach->SetupBones(nullptr, -1, BONE_USED_BY_ANYTHING, flCurTime);
+	}
+	__except (EXCEPTION_EXECUTE_HANDLER) {
+		// Silently skip corrupted attachments
+	}
+}
+
+static bool SafeSetupBones(C_TFPlayer* pPlayer, matrix3x4_t* pBoneMatrix, int nMaxBones, int nBoneMask, float flCurTime)
+{
+	__try {
+		return pPlayer->SetupBones(pBoneMatrix, nMaxBones, nBoneMask, flCurTime) != 0;
+	}
+	__except (EXCEPTION_EXECUTE_HANDLER) {
+		return false;
+	}
+}
+
+// SEH-safe entity validation — checks that the entity's internal state is safe
+// for SetupBones. Must be a plain function (no C++ objects with destructors)
+// because __try/__except can't coexist with object unwinding (C2712).
+// Returns true if the entity is valid and ready for bone setup.
+static bool SafeValidatePlayerForBones(C_TFPlayer* pPlayer)
+{
+	__try {
+		if (!pPlayer->GetClientNetworkable() || !pPlayer->GetClientNetworkable()->GetClientClass())
+			return false;
+
+		// Validate the renderable interface — SetupBones is dispatched through
+		// IClientRenderable. If the renderable is null or its vtable is corrupted,
+		// SetupBones will crash with RCX=0x0.
+		if (!pPlayer->GetClientRenderable())
+			return false;
+
+		// Check if player has a valid model
+		const auto pModel = pPlayer->GetModel();
+		if (!pModel)
+			return false;
+
+		// Validate the studio header is loaded — on high-player-count servers, entities
+		// can have a model pointer but the studio data isn't loaded yet.
+		const auto pStudioHdr = I::ModelInfoClient->GetStudiomodel(pModel);
+		if (!pStudioHdr || pStudioHdr->numbones <= 0)
+			return false;
+
+		// Early death detection — skip SetupBones on dying/dead players.
+		if (pPlayer->m_lifeState() != LIFE_ALIVE || pPlayer->m_iHealth() <= 0)
+			return false;
+
+		return true;
+	}
+	__except (EXCEPTION_EXECUTE_HANDLER) {
+		return false;
+	}
+}
+
+void CLagRecords::AddRecord(C_TFPlayer* pPlayer, int nKnownIndex)
 {
 	// Validate player before doing anything
-	if (!pPlayer || !pPlayer->GetClientNetworkable() || !pPlayer->GetClientNetworkable()->GetClientClass())
+	if (!pPlayer)
 		return;
 
-	// Check if player has a valid model - if not, skip bone setup
-	if (!pPlayer->GetModel())
+	// Track entity index for crash context
+	F::CrashHandler->s_Context.m_nEntityIndex = nKnownIndex;
+	F::CrashHandler->s_Context.m_pszLastSubFeature = "SafeIsEntityValid";
+
+	// Use SafeIsEntityValid with known index — avoids calling entindex() (virtual)
+	// on a potentially corrupted entity. On high-player-count servers (40+), entity
+	// slots are recycled rapidly and the pointer can become dangling between the
+	// FrameStageNotify loop check and this function.
+	if (nKnownIndex > 0 && !H::Entities->SafeIsEntityValid(pPlayer, nKnownIndex))
 		return;
 
-	// Early death detection — skip SetupBones on dying/dead players.
-	// deadflag() can lag a frame behind the actual death, but m_lifeState and
-	// m_iHealth update sooner. SetupBones on a model transitioning to death pose
-	// is extremely expensive (ragdoll IK solving, invalid bone configurations)
-	// and causes lag spikes on kill even with ragdolls disabled.
-	if (pPlayer->m_lifeState() != LIFE_ALIVE || pPlayer->m_iHealth() <= 0)
+	// SEH-safe validation of entity internal state — virtual calls on a partially
+	// destroyed entity can crash (RCX=0x0). SafeValidatePlayerForBones catches
+	// any ACCESS_VIOLATION during validation and returns false.
+	F::CrashHandler->s_Context.m_pszLastSubFeature = "ValidateEntity";
+	if (!SafeValidatePlayerForBones(pPlayer))
 		return;
 
 	LagRecord_t newRecord = {};
@@ -177,27 +260,23 @@ void CLagRecords::AddRecord(C_TFPlayer* pPlayer)
 
 	const bool bSetupBonesOpt = CFG::Misc_SetupBones_Optimization;
 
-	if (bSetupBonesOpt)
-		pPlayer->InvalidateBoneCache();
-
 	// BONE_USED_BY_ANYTHING — must use full bone mask, not BONE_USED_BY_HITBOX.
 	// TF2's procedural bone controllers (IK, look-at) depend on bones outside the hitbox set.
 	// BONE_USED_BY_HITBOX skips these controllers, producing slightly different hitbox bone positions.
-	const bool bResult = pPlayer->SetupBones(newRecord.BoneMatrix, 128, BONE_USED_BY_ANYTHING, I::GlobalVars->curtime);
+	F::CrashHandler->s_Context.m_pszLastSubFeature = "SetupBones";
+	const bool bResult = SafeInvalidateAndSetupBones(pPlayer, bSetupBonesOpt, newRecord.BoneMatrix, 128, BONE_USED_BY_ANYTHING, I::GlobalVars->curtime);
 
-	if (bSetupBonesOpt)
+	if (bSetupBonesOpt && bResult)
 	{
 		// Re-setup attachment bones after player bone invalidation — without this,
 		// attachments (hats, weapons) render at stale positions for one frame because
 		// their bone cache still references the old player bone transforms.
+		F::CrashHandler->s_Context.m_pszLastSubFeature = "AttachmentBones";
 		auto attach = pPlayer->FirstMoveChild();
 		while (attach)
 		{
 			if (attach->ShouldDraw())
-			{
-				attach->InvalidateBoneCache();
-				attach->SetupBones(nullptr, -1, BONE_USED_BY_ANYTHING, I::GlobalVars->curtime);
-			}
+				SafeSetupAttachmentBones(attach, I::GlobalVars->curtime);
 
 			attach = attach->NextMovePeer();
 		}
@@ -207,6 +286,8 @@ void CLagRecords::AddRecord(C_TFPlayer* pPlayer)
 
 	if (!bResult)
 		return;
+
+	F::CrashHandler->s_Context.m_pszLastSubFeature = "RecordData";
 
 	newRecord.Player = pPlayer;
 	newRecord.PlayerIndex = pPlayer->entindex();
@@ -321,9 +402,7 @@ void CLagRecords::UpdateRecords()
 	}
 
 	// Iterate flat array by entity index - much faster than unordered_map iteration
-	// Only iterate up to GetMaxClients() instead of MAX_LAG_RECORDS_SLOTS (101)
-	// Typical servers: 24-32 players, saves 70-80 empty slot checks per frame
-	const int nMaxClients = I::EngineClient->GetMaxClients();
+	const int nMaxClients = std::min(I::EngineClient->GetMaxClients(), MAX_LAG_RECORDS_SLOTS - 1);
 	for (int i = 1; i <= nMaxClients; i++)
 	{
 		auto& records = m_LagRecords[i];
@@ -428,7 +507,7 @@ LagRecord_t CLagRecords::GetInterpolatedRecord(C_TFPlayer* pPlayer, float flTarg
 		current.Velocity = pPlayer->m_vecVelocity();
 		current.Flags = pPlayer->m_fFlags();
 		if (pPlayer->m_lifeState() == LIFE_ALIVE && pPlayer->m_iHealth() > 0)
-			pPlayer->SetupBones(current.BoneMatrix, 128, BONE_USED_BY_ANYTHING, I::GlobalVars->curtime);
+			SafeSetupBones(pPlayer, current.BoneMatrix, 128, BONE_USED_BY_ANYTHING, I::GlobalVars->curtime);
 		return current;
 	}
 
@@ -484,7 +563,7 @@ LagRecord_t CLagRecords::GetInterpolatedRecord(C_TFPlayer* pPlayer, float flTarg
 		current.VecOrigin = pPlayer->m_vecOrigin();
 		current.Velocity = pPlayer->m_vecVelocity();
 		current.Flags = pPlayer->m_fFlags();
-		pPlayer->SetupBones(current.BoneMatrix, 128, BONE_USED_BY_ANYTHING, I::GlobalVars->curtime);
+		SafeSetupBones(pPlayer, current.BoneMatrix, 128, BONE_USED_BY_ANYTHING, I::GlobalVars->curtime);
 		return current;
 	}
 

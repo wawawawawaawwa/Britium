@@ -20,7 +20,7 @@
 
 constexpr int FAKELAG_MAX_TICKS = 24;
 constexpr int FAKELAG_CHOKE_THRESHOLD = 2;  // Consider choking if no update for 2+ ticks
-constexpr int FAKELAG_MAX_SLOTS = 65;        // Max entity slots
+constexpr int FAKELAG_MAX_SLOTS = ABSOLUTE_PLAYER_LIMIT + 1;        // Max player index slots
 
 class CFakeLagFix
 {

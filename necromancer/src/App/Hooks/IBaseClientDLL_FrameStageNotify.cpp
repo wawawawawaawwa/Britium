@@ -11,6 +11,54 @@
 #include "../Features/NavBot/NavBot.h"
 #include "../../Utils/CrashHandler/CrashHandler.h"
 
+// SEH-safe entity validation — on high-player-count servers (40+), entity slots can be
+// recycled mid-frame. GetClientEntity(n) returns a non-null pointer, but the entity's
+// vtable/internal state is corrupted (RCX=0x0 crash on any virtual call). This helper
+// catches ACCESS_VIOLATION during validation and returns null.
+// Must be a plain function (no C++ objects with destructors) for __try/__except.
+static C_TFPlayer* SafeGetPlayerEntity(int nIndex)
+{
+	__try {
+		auto pClientEntity = I::ClientEntityList->GetClientEntity(nIndex);
+		if (!pClientEntity || pClientEntity->IsDormant())
+			return nullptr;
+
+		auto pNetworkable = pClientEntity->GetClientNetworkable();
+		if (!pNetworkable || !pNetworkable->GetClientClass())
+			return nullptr;
+
+		if (pNetworkable->GetClientClass()->m_ClassID != static_cast<int>(ETFClassIds::CTFPlayer))
+			return nullptr;
+
+		auto pPlayer = pClientEntity->As<C_TFPlayer>();
+		if (!pPlayer)
+			return nullptr;
+
+		// Quick liveness check — if the entity is dead, skip it early.
+		// This also validates that basic netvar access works on the entity.
+		if (pPlayer->m_lifeState() != LIFE_ALIVE && pPlayer->deadflag())
+			return nullptr;
+
+		return pPlayer;
+	}
+	__except (EXCEPTION_EXECUTE_HANDLER) {
+		return nullptr;
+	}
+}
+
+// SEH-safe animation update — UpdateClientSideAnimation is a virtual call that
+// can crash on corrupted entities. Must be plain function for __try/__except.
+static void SafeUpdateClientSideAnimation(C_TFPlayer* pPlayer, int nIterations)
+{
+	__try {
+		for (int j = 0; j < nIterations; j++)
+			pPlayer->UpdateClientSideAnimation();
+	}
+	__except (EXCEPTION_EXECUTE_HANDLER) {
+		// Silently skip corrupted entity animation update
+	}
+}
+
 // Convar backup system: file-scope so RestoreConvarBackups() can access it.
 namespace ConvarBackup
 {
@@ -254,19 +302,14 @@ MAKE_HOOK(IBaseClientDLL_FrameStageNotify, Memory::GetVFunc(I::BaseClientDLL, 35
 			
 			for (int n = 1; n <= nMaxClients; n++)
 			{
-				auto pClientEntity = I::ClientEntityList->GetClientEntity(n);
-				if (!pClientEntity || pClientEntity->IsDormant())
-					continue;
+				F::CrashHandler->s_Context.m_pszLastFeature = "FrameStageNotify";
+				F::CrashHandler->s_Context.m_nEntityIndex = n;
+				F::CrashHandler->s_Context.m_pszLastSubFeature = "SafeGetPlayerEntity";
 
-				// Validate client class before casting
-				auto pNetworkable = pClientEntity->GetClientNetworkable();
-				if (!pNetworkable || !pNetworkable->GetClientClass())
-					continue;
-
-				if (pNetworkable->GetClientClass()->m_ClassID != static_cast<int>(ETFClassIds::CTFPlayer))
-					continue;
-
-				const auto pPlayer = pClientEntity->As<C_TFPlayer>();
+				// SEH-safe entity validation — high-player-count servers can expose player
+				// indices up to EngineClient->GetMaxClients(). Calling ANY virtual method on a
+				// bad transient entity state crashes with RCX=0x0, so validate in one protected path.
+				const auto pPlayer = SafeGetPlayerEntity(n);
 				if (!pPlayer)
 					continue;
 
@@ -298,7 +341,7 @@ MAKE_HOOK(IBaseClientDLL_FrameStageNotify, Memory::GetVFunc(I::BaseClientDLL, 35
 							else
 							{
 								F::CrashHandler->s_Context.m_pszLastFeature = "LagRecords::AddRecord";
-								F::LagRecords->AddRecord(pPlayer);
+								F::LagRecords->AddRecord(pPlayer, n);
 							}
 						}
 
@@ -317,6 +360,7 @@ MAKE_HOOK(IBaseClientDLL_FrameStageNotify, Memory::GetVFunc(I::BaseClientDLL, 35
 					// many animation iterations on a dying model (expensive + causes lag spikes on kill)
 					if (bDoAnimUpdates && !bIsDead && !CFG::Perf_Extreme_Skip_Anim_Updates)
 					{
+						F::CrashHandler->s_Context.m_pszLastSubFeature = "UpdateClientSideAnimation";
 						const float flOldFrameTime = I::GlobalVars->frametime;
 						I::GlobalVars->frametime = flAnimFrameTime;
 
@@ -328,7 +372,7 @@ MAKE_HOOK(IBaseClientDLL_FrameStageNotify, Memory::GetVFunc(I::BaseClientDLL, 35
 						if (nDifference == 1)
 						{
 							// Normal case: single tick advance (cheap, always do it)
-							pPlayer->UpdateClientSideAnimation();
+							SafeUpdateClientSideAnimation(pPlayer, 1);
 						}
 						else if (nDifference > 1)
 						{
@@ -336,10 +380,7 @@ MAKE_HOOK(IBaseClientDLL_FrameStageNotify, Memory::GetVFunc(I::BaseClientDLL, 35
 							// High-ping players will catch up over multiple frames
 							constexpr int MAX_ANIM_ITERATIONS_PER_FRAME = 5;
 							const int nIterations = std::min(nDifference, MAX_ANIM_ITERATIONS_PER_FRAME);
-							for (int j = 0; j < nIterations; j++)
-							{
-								pPlayer->UpdateClientSideAnimation();
-							}
+							SafeUpdateClientSideAnimation(pPlayer, nIterations);
 						}
 						
 						G::bUpdatingAnims = false;
@@ -352,7 +393,11 @@ MAKE_HOOK(IBaseClientDLL_FrameStageNotify, Memory::GetVFunc(I::BaseClientDLL, 35
 					G::mapVelFixRecords[n] = { pPlayer->m_vecOrigin(), pPlayer->m_fFlags(), pPlayer->m_flSimulationTime(), true };
 			}
 
+			F::CrashHandler->s_Context.m_pszLastFeature = "LagRecords";
+			F::CrashHandler->s_Context.m_pszLastSubFeature = "UpdateDatagram";
 			F::LagRecords->UpdateDatagram();
+
+			F::CrashHandler->s_Context.m_pszLastSubFeature = "UpdateRecords";
 			F::LagRecords->UpdateRecords();
 			if (!CFG::Perf_Extreme_Skip_MovementSimulation)
 				F::MovementSimulation->Store(); // Store movement records for strafe prediction

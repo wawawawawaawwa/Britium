@@ -39,7 +39,7 @@ private:
     DatamapRestore_t m_tLocal = {};
 
     // Flat array indexed by entity index - O(1) lookup, no hash overhead
-    static constexpr int MAX_RESTORE_SLOTS = 65;
+    static constexpr int MAX_RESTORE_SLOTS = ABSOLUTE_PLAYER_LIMIT + 1;
     AmalgamRestoreInfo_t m_mRestore[MAX_RESTORE_SLOTS] = {};
 
 public:

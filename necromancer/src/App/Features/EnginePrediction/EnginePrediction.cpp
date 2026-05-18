@@ -10,7 +10,7 @@ void CEnginePrediction::AdjustPlayers(C_BaseEntity* pLocal)
 	for (int i = 0; i < MAX_RESTORE_SLOTS; i++)
 		m_mRestore[i].m_bActive = false;
 
-	const int nMaxClients = I::EngineClient->GetMaxClients();
+	const int nMaxClients = std::min(I::EngineClient->GetMaxClients(), MAX_RESTORE_SLOTS - 1);
 	for (int i = 1; i <= nMaxClients; i++)
 	{
 		const auto pEntity = I::ClientEntityList->GetClientEntity(i);

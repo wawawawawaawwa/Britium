@@ -334,10 +334,10 @@ static LONG APIENTRY ExceptionFilter(PEXCEPTION_POINTERS ExceptionInfo)
 		const auto& ctx = CCrashHandler::s_Context;
 		ss << "\n--- Crash Context ---\n";
 		ss << std::format("Hook: {}\n", ctx.m_pszLastHook);
-		ss << std::format("Feature: {}\n", ctx.m_pszLastFeature);
+		ss << std::format("Feature: {}::{}\n", ctx.m_pszLastFeature, ctx.m_pszLastSubFeature);
 		ss << std::format("InGame: {} | LevelTransition: {}\n", ctx.m_bInGame, ctx.m_bLevelTransition);
 		ss << std::format("Map: {}\n", ctx.m_szMapName[0] ? ctx.m_szMapName : "(unknown)");
-		ss << std::format("CmdNum: {} | TargetIdx: {}\n", ctx.m_nCommandNumber, ctx.m_nTargetIndex);
+		ss << std::format("CmdNum: {} | TargetIdx: {} | EntityIdx: {}\n", ctx.m_nCommandNumber, ctx.m_nTargetIndex, ctx.m_nEntityIndex);
 	}
 
 	// Registers

@@ -6,8 +6,9 @@ void CFakeLagFix::Update()
 {
 	const float flTickInterval = I::GlobalVars->interval_per_tick;
 
-	// Iterate all possible player slots
-	for (int i = 1; i < FAKELAG_MAX_SLOTS; i++)
+	// Iterate active player slots
+	const int nMaxClients = std::min(I::EngineClient->GetMaxClients(), FAKELAG_MAX_SLOTS - 1);
+	for (int i = 1; i <= nMaxClients; i++)
 	{
 		const auto pEntity = I::ClientEntityList->GetClientEntity(i);
 		auto& data = m_ChokeData[i];
