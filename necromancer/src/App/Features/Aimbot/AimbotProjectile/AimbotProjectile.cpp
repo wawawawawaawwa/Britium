@@ -951,7 +951,7 @@ bool CAimbotProjectile::SolveTarget(C_TFPlayer* pLocal, C_TFWeaponBase* pWeapon,
 {
 	Vec3 vLocalPos = pLocal->GetShootPos();
 	const int nWeaponID = m_CurProjInfo.WeaponID;
-	const int nMaxSimTicks = TIME_TO_TICKS(std::min(CFG::Aimbot_Projectile_Max_Simulation_Time, 7.0f));
+	int nMaxSimTicks = TIME_TO_TICKS(std::min(CFG::Aimbot_Projectile_Max_Simulation_Time, 7.0f));
 	const float flLatency = SDKUtils::GetLatency();
 	const bool bIsSticky = nWeaponID == TF_WEAPON_PIPEBOMBLAUNCHER;
 	const float flStickyArmTime = bIsSticky ? SDKUtils::AttribHookValue(0.8f, "sticky_arm_time", pLocal) : 0.0f;
@@ -990,10 +990,34 @@ bool CAimbotProjectile::SolveTarget(C_TFPlayer* pLocal, C_TFWeaponBase* pWeapon,
 		if (!F::MovementSimulation->Initialize(pPlayer))
 			return false;
 
+		// Adaptive prediction horizon: strafing/antiaim targets are harder to predict,
+		// but we must NOT prevent the aimbot from finding long-range solutions.
+		// Instead of hard-capping sim ticks (which makes long-range targets unshootable),
+		// only shorten the horizon for truly unpredictable states (explosive launch).
+		// Strafing/antiaim still get the full horizon — the sim handles them via
+		// rigid ground mode and yaw decay rather than tick count truncation.
+		{
+			const auto& simState = F::MovementSimulation->GetStorage();
+
+			// Phase 6: explosive launch (rocket/sticky jump) — trajectory is
+			// fundamentally unpredictable. Cap hard to avoid wasting ticks.
+			if (simState.m_bExplosiveLaunch)
+				nMaxSimTicks = std::min(nMaxSimTicks, TIME_TO_TICKS(0.5f));
+
+			// Phase 5: shorten horizon on recent reversals — extrapolating
+			// a turn-rate that just reversed is worse than a short straight prediction.
+			// But still allow enough ticks for medium-range shots.
+			if (simState.m_bRecentReversal)
+				nMaxSimTicks = std::min(nMaxSimTicks, TIME_TO_TICKS(0.5f));
+
+		}
+
 		// Stationary enemies: skip RunTick() — their position doesn't change,
 		// so GetOrigin() always returns their current position. This lets the
 		// full logic (splash, multipoint, lob, path drawing) still work.
 		const bool bStationary = F::MovementSimulation->IsStationary();
+		// Phase 6: also capture reversal state so the aimbot gate can widen.
+		const bool bReversal = F::MovementSimulation->GetStorage().m_bRecentReversal;
 
 		// Pre-calculate splash radius (weapon doesn't change between ticks)
 		float flSplashRadius = 0.0f;
@@ -1146,7 +1170,9 @@ bool CAimbotProjectile::SolveTarget(C_TFPlayer* pLocal, C_TFWeaponBase* pWeapon,
 				}
 			}
 
-			if ((nTargetTick == nTick || nTargetTick == nTick - 1))
+			if ((nTargetTick == nTick || nTargetTick == nTick - 1)
+				|| (bStationary && nTargetTick <= nTick)
+				|| (bReversal && nTargetTick >= nTick - 2 && nTargetTick <= nTick + 2))
 			{
 				if (CFG::Aimbot_Projectile_Rocket_Splash == 2 && runSplash(vTarget))
 				{
@@ -2079,6 +2105,8 @@ void CAimbotProjectile::Run(CUserCmd* pCmd, C_TFPlayer* pLocal, C_TFWeaponBase* 
 				I::DebugOverlay->ClearAllOverlays();
 				DrawProjPath(pCmd, target.TimeToTarget);
 				DrawMovePath(m_TargetPath);
+
+
 				m_TargetPath.clear();
 			}
 		}

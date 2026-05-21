@@ -917,6 +917,27 @@ int CAmalgamAimbotProjectile::CanHit(Target_t& tTarget, CTFPlayer* pLocal, CTFWe
 
 	int iReturn = false;
 	float flMaxSimTime = std::min(std::min(tProjInfo.m_flLifetime, Vars::Aimbot::Projectile::MaxSimulationTime.Value), 7.0f);
+
+	// Adaptive prediction horizon: strafing/antiaim targets are harder to predict,
+	// but we must NOT prevent the aimbot from finding long-range solutions.
+	// Only shorten the horizon for truly unpredictable states (explosive launch).
+	// Strafing/antiaim still get the full horizon — the sim handles them via
+	// rigid ground mode and yaw decay rather than tick count truncation.
+	if (bMoveSim)
+	{
+		const auto& simState = F::MovementSimulation->GetStorage();
+
+		// Phase 6: explosive launch (rocket/sticky jump) — trajectory is
+		// fundamentally unpredictable. Cap hard to avoid wasting ticks.
+		if (simState.m_bExplosiveLaunch)
+			flMaxSimTime = std::min(flMaxSimTime, 0.5f);
+		// Phase 5: shorten horizon on recent reversals — extrapolating
+		// a turn-rate that just reversed is worse than a short straight prediction.
+		// But still allow enough ticks for medium-range shots.
+		if (simState.m_bRecentReversal)
+			flMaxSimTime = std::min(flMaxSimTime, 0.5f);
+	}
+
 	int iMaxTime = TIME_TO_TICKS(flMaxSimTime);
 	if (iMaxTime > 462)
 		iMaxTime = 462;
@@ -1488,6 +1509,7 @@ bool CAmalgamAimbotProjectile::RunMain(C_TFPlayer* pLocal, C_TFWeaponBase* pWeap
 	if (bIsFiring && !m_vCachedProjectilePath.empty())
 	{
 		I::DebugOverlay->ClearAllOverlays();
+
 
 		if (CFG::Visuals_Draw_Movement_Path_Style > 0 && !m_vCachedPlayerPath.empty())
 		{

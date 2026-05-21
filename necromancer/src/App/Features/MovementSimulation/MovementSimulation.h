@@ -25,6 +25,11 @@ struct MoveRecord
 	bool m_bHitWall = false;
 	bool m_bEvasiveFriction = false;   // RijiN: rapidly changing direction on ground — apply extra friction
 	bool m_bEvasiveZeroVel = false;    // RijiN: extremely erratic movement — zero velocity
+
+	// Eye angle tracking for antiaim detection
+	float m_flEyeYaw = 0.f;
+	float m_flEyePitch = 0.f;
+	float m_flVelEyeDelta = 0.f;       // |velocity yaw - eye yaw|, 0-180 degrees
 };
 
 struct MoveStorage
@@ -56,6 +61,27 @@ struct MoveStorage
 	bool m_bFailed = false;
 	bool m_bInitFailed = false;
 	bool m_bStationary = false;
+
+	// --- Antiaim / strafe detection state (for logging and prediction) ---
+	bool m_bAntiAimDetected = false;     // Eye angles appear fake (jittery while origin is smooth)
+	bool m_bStrafing = false;            // VelEyeDelta > 45° — player is actively strafing
+	float m_flVelEyeDeltaAtInit = 0.f;   // VelEyeDelta at sim init time
+	float m_flOriginCurvature = 0.f;     // Origin-trajectory curvature (deg/tick) — immune to antiaim
+	float m_flForwardMove = 0.f;         // Sim input at init (for logging)
+	float m_flSideMove = 0.f;            // Sim input at init (for logging)
+
+	// Phase 3 — rigid-turn mode for grounded players. When true, the per-tick
+	// avg-yaw rotation in RunTick is suppressed so the sim produces straight-line
+	// trajectories that match real "stiff" human movement (walking/peeking).
+	// Decided once at init: ON unless strong sustained strafe evidence.
+	bool m_bRigidGround = false;
+	// Phase 5 — recent velocity reversal detected (player just changed direction,
+	// e.g. peek-out → peek-in). Used to disable yaw rotation and shorten horizon.
+	bool m_bRecentReversal = false;
+	// Phase 6 — explosive launch detected (airborne + speed > class_max * 1.5).
+	// Player was rocket/sticky jumped — trajectory is fundamentally unpredictable.
+	// Shortens prediction horizon and disables yaw averaging.
+	bool m_bExplosiveLaunch = false;
 };
 
 class CMovementSimulation
@@ -76,6 +102,7 @@ public:
 	inline const Vec3& GetVelocity() const { return m_CurrentStorage.m_MoveData.m_vecVelocity; }
 	inline bool HasFailed() const { return m_CurrentStorage.m_bFailed || m_CurrentStorage.m_bInitFailed; }
 	inline bool IsStationary() const { return m_CurrentStorage.m_bStationary; }
+	inline const MoveStorage& GetStorage() const { return m_CurrentStorage; }
 
 	void ClearRecords();
 	float GetPredictedDelta(C_TFPlayer* pPlayer);
@@ -90,6 +117,11 @@ private:
 
 	bool IsBunnyHopping(C_TFPlayer* pPlayer, float* pCadenceOut = nullptr);
 	int GetChokedTicks(C_TFPlayer* pPlayer) const;
+
+	// Antiaim detection: check if eye angles are unreliable
+	bool IsAntiAiming(C_TFPlayer* pPlayer);
+	// Origin-trajectory curvature: turning rate from position history (immune to fake angles)
+	float GetOriginCurvature(C_TFPlayer* pPlayer);
 
 	void SetBounds(C_TFPlayer* pPlayer);
 	void RestoreBounds(C_TFPlayer* pPlayer);

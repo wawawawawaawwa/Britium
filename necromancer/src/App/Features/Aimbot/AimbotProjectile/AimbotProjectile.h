@@ -1,5 +1,6 @@
 #pragma once
 #include "../AimbotCommon/AimbotCommon.h"
+#include "../../MovementSimulation/MovementSimulation.h"
 
 class CAimbotProjectile
 {

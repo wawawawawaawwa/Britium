@@ -1,6 +1,7 @@
 #pragma once
 
 #include "../AmalgamCompat.h"
+#include "../../MovementSimulation/MovementSimulation.h"
 #include "../AimbotGlobal/AimbotGlobal.h"
 
 // ============================================

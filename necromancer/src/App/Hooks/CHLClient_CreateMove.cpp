@@ -667,6 +667,7 @@ AfterPrediction:
 	G::nOldButtons = pCmd->buttons;
 	G::vUserCmdAngles = pCmd->viewangles;
 
+
 	// Silent aim handling
 	if (G::bSilentAngles || G::bPSilentAngles)
 	{
