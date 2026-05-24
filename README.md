@@ -1,6 +1,6 @@
 <div align="center">
 
-# necromancer
+# Britium
 
 [![Discord](https://img.shields.io/discord/1448765295224291330?style=for-the-badge&logo=discord&label=Discord&color=bdb6fc)](https://discord.gg/zxQ97SYYwJ)
 
