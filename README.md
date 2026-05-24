@@ -2,8 +2,6 @@
 
 # Britium
 
-[![Discord](https://img.shields.io/discord/1448765295224291330?style=for-the-badge&logo=discord&label=Discord&color=bdb6fc)](https://discord.gg/zxQ97SYYwJ)
-
 [![Download](https://img.shields.io/badge/Download-Release-blue?style=for-the-badge)](https://nightly.link/asdasfxcvxcvcb/necromancer/workflows/nightly/main/necromancer-Release-x64.zip)
 [![Download AVX2](https://img.shields.io/badge/Download-AVX2-orange?style=for-the-badge)](https://nightly.link/asdasfxcvxcvcb/necromancer/workflows/nightly/main/necromancer-ReleaseAVX2-x64.zip)
 
